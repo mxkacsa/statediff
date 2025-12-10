@@ -13,12 +13,13 @@ type Generator struct {
 	packageName     string
 	pointerReceiver bool
 	skipFields      map[string]bool
-	imports         map[string]bool
+	imports         map[string]bool   // tracked imports to include in generated file (import path -> true)
+	pkgImports      map[string]string // source package imports: pkg name -> import path (e.g., "url" -> "net/url")
 	warnings        []string
 }
 
 // NewGenerator creates a new code generator
-func NewGenerator(packageName string, pointerReceiver bool, skipFields []string) *Generator {
+func NewGenerator(packageName string, pointerReceiver bool, skipFields []string, pkgImports map[string]string) *Generator {
 	skip := make(map[string]bool)
 	for _, f := range skipFields {
 		skip[f] = true
@@ -28,6 +29,7 @@ func NewGenerator(packageName string, pointerReceiver bool, skipFields []string)
 		pointerReceiver: pointerReceiver,
 		skipFields:      skip,
 		imports:         make(map[string]bool),
+		pkgImports:      pkgImports,
 	}
 }
 
@@ -192,6 +194,9 @@ func (g *Generator) generateFieldClone(field *FieldInfo, receiver string) string
 func (g *Generator) generateSliceClone(field *FieldInfo, src, dst string) string {
 	var buf bytes.Buffer
 
+	// Track import for cross-package types
+	g.trackImport(field.TypeStr)
+
 	buf.WriteString(fmt.Sprintf("\tif %s != nil {\n", src))
 	buf.WriteString(fmt.Sprintf("\t\t%s = make(%s, len(%s))\n", dst, field.TypeStr, src))
 
@@ -232,6 +237,9 @@ func (g *Generator) generateArrayClone(field *FieldInfo, src, dst string) string
 func (g *Generator) generateMapClone(field *FieldInfo, src, dst string) string {
 	var buf bytes.Buffer
 
+	// Track imports for cross-package types
+	g.trackImport(field.TypeStr)
+
 	buf.WriteString(fmt.Sprintf("\tif %s != nil {\n", src))
 	buf.WriteString(fmt.Sprintf("\t\t%s = make(%s, len(%s))\n", dst, field.TypeStr, src))
 
@@ -248,6 +256,11 @@ func (g *Generator) generateMapClone(field *FieldInfo, src, dst string) string {
 // generatePointerClone generates pointer cloning code
 func (g *Generator) generatePointerClone(field *FieldInfo, src, dst string) string {
 	var buf bytes.Buffer
+
+	// Track imports for cross-package types (but not for time.Time which is handled as primitive)
+	if field.ElemKind != KindTime && field.ElemKind != KindPrimitive && field.ElemKind != KindString {
+		g.trackImport(field.ElemType)
+	}
 
 	buf.WriteString(fmt.Sprintf("\tif %s != nil {\n", src))
 
@@ -295,6 +308,7 @@ func (g *Generator) getElemCloneExpr(field *FieldInfo, varName string) string {
 		return varName
 
 	case KindStruct:
+		g.trackImport(field.ElemType)
 		if field.HasClone {
 			return varName + ".Clone()"
 		}
@@ -302,6 +316,7 @@ func (g *Generator) getElemCloneExpr(field *FieldInfo, varName string) string {
 
 	case KindPointer:
 		// Pointer element in slice, e.g., []*Item
+		g.trackImport(field.ElemType)
 		if field.HasClone {
 			return fmt.Sprintf("func() %s { if %s == nil { return nil }; v := %s.Clone(); return &v }()",
 				field.ElemType, varName, varName)
@@ -311,6 +326,7 @@ func (g *Generator) getElemCloneExpr(field *FieldInfo, varName string) string {
 
 	case KindSlice:
 		// Nested slice
+		g.trackImport(field.ElemType)
 		return fmt.Sprintf("append(%s(nil), %s...)", field.ElemType, varName)
 
 	case KindMap:
@@ -329,12 +345,14 @@ func (g *Generator) getMapValueCloneExpr(field *FieldInfo, varName string) strin
 		return varName
 
 	case KindStruct:
+		g.trackImport(field.ElemType)
 		if field.HasClone {
 			return varName + ".Clone()"
 		}
 		return varName
 
 	case KindPointer:
+		g.trackImport(field.ElemType)
 		if field.HasClone {
 			return fmt.Sprintf("func() %s { if %s == nil { return nil }; v := %s.Clone(); return &v }()",
 				field.ElemType, varName, varName)
@@ -343,11 +361,63 @@ func (g *Generator) getMapValueCloneExpr(field *FieldInfo, varName string) strin
 			field.ElemType, varName, varName)
 
 	case KindSlice:
+		g.trackImport(field.ElemType)
 		return fmt.Sprintf("append(%s(nil), %s...)", field.ElemType, varName)
 
 	default:
 		return varName
 	}
+}
+
+// trackImport extracts and tracks import paths from type strings like "url.URL" or "[]url.URL"
+func (g *Generator) trackImport(typeStr string) {
+	// Extract package name from type string
+	// Examples: "url.URL" -> "url", "[]url.URL" -> "url", "*url.URL" -> "url", "map[string]url.URL" -> "url"
+	pkgName := extractPackageName(typeStr)
+	if pkgName == "" {
+		return
+	}
+
+	// Look up the full import path from source package imports
+	if importPath, ok := g.pkgImports[pkgName]; ok {
+		g.imports[importPath] = true
+	}
+}
+
+// extractPackageName extracts package name from a type string
+// Returns empty string if no package qualifier found
+func extractPackageName(typeStr string) string {
+	// Skip common prefixes
+	s := typeStr
+	for {
+		if strings.HasPrefix(s, "[]") {
+			s = s[2:]
+		} else if strings.HasPrefix(s, "*") {
+			s = s[1:]
+		} else if strings.HasPrefix(s, "map[") {
+			// Find the closing bracket and get the value type
+			depth := 1
+			for i := 4; i < len(s); i++ {
+				if s[i] == '[' {
+					depth++
+				} else if s[i] == ']' {
+					depth--
+					if depth == 0 {
+						s = s[i+1:]
+						break
+					}
+				}
+			}
+		} else {
+			break
+		}
+	}
+
+	// Now s should be like "url.URL" or "string" or "MyType"
+	if idx := strings.Index(s, "."); idx > 0 {
+		return s[:idx]
+	}
+	return ""
 }
 
 // Unused but kept for potential template-based generation

@@ -107,7 +107,7 @@ func run(cfg Config) error {
 	}
 
 	// Generate code
-	gen := NewGenerator(pkg.Name, cfg.PointerReceiver, cfg.SkipFields)
+	gen := NewGenerator(pkg.Name, cfg.PointerReceiver, cfg.SkipFields, pkg.Imports)
 	code, err := gen.Generate(typeInfos)
 	if err != nil {
 		return fmt.Errorf("generate: %w", err)

@@ -226,7 +226,7 @@ type Game struct {
 		t.Fatalf("Analyze Game: %v", err)
 	}
 
-	gen := NewGenerator("testpkg", false, nil)
+	gen := NewGenerator("testpkg", false, nil, nil)
 	code, err := gen.Generate([]*TypeInfo{itemInfo, gameInfo})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)

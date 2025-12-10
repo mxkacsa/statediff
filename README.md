@@ -12,7 +12,7 @@ Deterministic state synchronization for Go. Automatic JSON diff generation, reve
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │                         State[T]                                    │   │
 │  │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐   │   │
-│  │  │  Base State  │───▶│   Effects    │───▶│  Effective State    │   │   │
+│  │  │  Base State  │──▶│   Effects    │──▶ │  Effective State     │   │   │
 │  │  │  {round: 5}  │    │  [buff x2]   │    │  {round: 5, hp: 200} │   │   │
 │  │  └──────────────┘    └──────────────┘    └──────────────────────┘   │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │

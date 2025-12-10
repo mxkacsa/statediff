@@ -22,6 +22,7 @@ type Package struct {
 	TypesPkg   *types.Package
 	Structs    map[string]*ast.StructType
 	StructObjs map[string]*types.Struct
+	Imports    map[string]string // package name -> import path (e.g., "url" -> "net/url")
 }
 
 // parsePackage parses the Go package in the given directory
@@ -65,6 +66,23 @@ func parsePackage(dir string) (*Package, error) {
 		TypesPkg:   p.Types,
 		Structs:    make(map[string]*ast.StructType),
 		StructObjs: make(map[string]*types.Struct),
+		Imports:    make(map[string]string),
+	}
+
+	// Extract imports and struct definitions
+	for _, file := range p.Syntax {
+		// Collect imports from all files
+		for _, imp := range file.Imports {
+			importPath := imp.Path.Value[1 : len(imp.Path.Value)-1] // Remove quotes
+			var pkgName string
+			if imp.Name != nil {
+				pkgName = imp.Name.Name
+			} else {
+				// Use last component of import path as package name
+				pkgName = filepath.Base(importPath)
+			}
+			pkg.Imports[pkgName] = importPath
+		}
 	}
 
 	// Extract struct definitions
@@ -155,6 +173,21 @@ func parsePackageAST(dir string) (*Package, error) {
 		Files:      files,
 		Structs:    make(map[string]*ast.StructType),
 		StructObjs: make(map[string]*types.Struct),
+		Imports:    make(map[string]string),
+	}
+
+	// Extract imports from all files
+	for _, file := range files {
+		for _, imp := range file.Imports {
+			importPath := imp.Path.Value[1 : len(imp.Path.Value)-1] // Remove quotes
+			var impName string
+			if imp.Name != nil {
+				impName = imp.Name.Name
+			} else {
+				impName = filepath.Base(importPath)
+			}
+			pkg.Imports[impName] = importPath
+		}
 	}
 
 	// Extract struct definitions from AST only

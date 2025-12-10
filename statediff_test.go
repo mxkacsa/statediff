@@ -21,8 +21,13 @@ type Item struct {
 	Data int    `json:"data"`
 }
 
+// Activator type for tests - using *string so nil means "system"
+type Activator = *string
+
+func strPtr(s string) *string { return &s }
+
 func TestStateBasic(t *testing.T) {
-	s := MustNew(TestState{Value: 1, Name: "test"}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1, Name: "test"}, nil)
 
 	if got := s.Get(); got.Value != 1 {
 		t.Errorf("Get() = %d, want 1", got.Value)
@@ -38,7 +43,7 @@ func TestStateBasic(t *testing.T) {
 }
 
 func TestDiff(t *testing.T) {
-	s := MustNew(TestState{Value: 1, Name: "test"}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1, Name: "test"}, nil)
 
 	// No previous - should return nil
 	diff, err := s.Diff(nil)
@@ -67,13 +72,13 @@ func TestDiff(t *testing.T) {
 }
 
 func TestEffect(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
 	// Add doubling effect
-	s.AddEffect(Func("double", func(ts TestState) TestState {
+	s.AddEffect(Func[TestState, Activator]("double", func(ts TestState, activator Activator) TestState {
 		ts.Value *= 2
 		return ts
-	}))
+	}), nil)
 
 	// Base unchanged
 	if got := s.GetBase(); got.Value != 100 {
@@ -93,13 +98,13 @@ func TestEffect(t *testing.T) {
 }
 
 func TestTimedEffect(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
-	effect := Timed("temp", 50*time.Millisecond, func(ts TestState) TestState {
+	effect := Timed[TestState, Activator]("temp", 50*time.Millisecond, func(ts TestState, activator Activator) TestState {
 		ts.Value = 999
 		return ts
 	})
-	s.AddEffect(effect)
+	s.AddEffect(effect, nil)
 
 	// Active
 	if got := s.Get(); got.Value != 999 {
@@ -116,15 +121,15 @@ func TestTimedEffect(t *testing.T) {
 }
 
 func TestConditionalEffect(t *testing.T) {
-	s := MustNew(TestState{Value: 100, Name: "active"}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100, Name: "active"}, nil)
 
-	s.AddEffect(Conditional("cond",
-		func(ts TestState) bool { return ts.Name == "active" },
-		func(ts TestState) TestState {
+	s.AddEffect(Conditional[TestState, Activator]("cond",
+		func(ts TestState, activator Activator) bool { return ts.Name == "active" },
+		func(ts TestState, activator Activator) TestState {
 			ts.Value = 999
 			return ts
 		},
-	))
+	), nil)
 
 	// Condition true
 	if got := s.Get(); got.Value != 999 {
@@ -143,9 +148,9 @@ func TestConditionalEffect(t *testing.T) {
 }
 
 func TestStackEffect(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
-	stack := Stack[TestState, float64]("mult", func(ts TestState, vals []float64) TestState {
+	stack := Stack[TestState, Activator, float64]("mult", func(ts TestState, vals []float64, activator Activator) TestState {
 		mult := 1.0
 		for _, v := range vals {
 			mult *= v
@@ -153,7 +158,7 @@ func TestStackEffect(t *testing.T) {
 		ts.Value = int(float64(ts.Value) * mult)
 		return ts
 	})
-	s.AddEffect(stack)
+	s.AddEffect(stack, nil)
 
 	stack.Push(2.0)
 	if got := s.Get(); got.Value != 200 {
@@ -172,8 +177,8 @@ func TestStackEffect(t *testing.T) {
 }
 
 func TestSession(t *testing.T) {
-	s := MustNew(TestState{Value: 1, Secret: "hidden"}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1, Secret: "hidden"}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 
 	// Connect with projection that hides Secret
 	sess.Connect("user1", func(ts TestState) TestState {
@@ -201,8 +206,8 @@ func TestSession(t *testing.T) {
 }
 
 func TestBroadcast(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 
 	sess.Connect("a", nil)
 	sess.Connect("b", nil)
@@ -218,7 +223,7 @@ func TestBroadcast(t *testing.T) {
 }
 
 func TestArrayDiffByKey(t *testing.T) {
-	s := MustNew(TestState{
+	s := MustNew[TestState, Activator](TestState{
 		Items: []Item{{ID: "a", Data: 1}, {ID: "b", Data: 2}},
 	}, &Config[TestState]{
 		ArrayStrategy: ArrayByKey,
@@ -242,7 +247,7 @@ func TestArrayDiffByKey(t *testing.T) {
 func TestArrayByKeyRemoveOrder(t *testing.T) {
 	// Test that multiple removes are ordered correctly (descending index)
 	// to prevent index shift issues when applying JSON Patch sequentially
-	s := MustNew(TestState{
+	s := MustNew[TestState, Activator](TestState{
 		Items: []Item{{ID: "a", Data: 1}, {ID: "b", Data: 2}, {ID: "c", Data: 3}},
 	}, &Config[TestState]{
 		ArrayStrategy: ArrayByKey,
@@ -286,7 +291,7 @@ func TestArrayByKeyRemoveAndModify(t *testing.T) {
 	// Test: remove an element AND modify another
 	// Old: [A, B, C] -> New: [A, C'] (B removed, C modified)
 	// The modify should use the NEW index (1), not the old index (2)
-	s := MustNew(TestState{
+	s := MustNew[TestState, Activator](TestState{
 		Items: []Item{{ID: "a", Data: 1}, {ID: "b", Data: 2}, {ID: "c", Data: 3}},
 	}, &Config[TestState]{
 		ArrayStrategy: ArrayByKey,
@@ -322,7 +327,7 @@ func TestArrayByKeyRemoveAndModify(t *testing.T) {
 func TestPersist(t *testing.T) {
 	path := "/tmp/statediff_test.json"
 
-	s := MustNew(TestState{Value: 42, Name: "test"}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 42, Name: "test"}, nil)
 
 	err := Save(path, s, nil, nil)
 	if err != nil {
@@ -342,7 +347,7 @@ func TestPersist(t *testing.T) {
 }
 
 func BenchmarkDiff(b *testing.B) {
-	s := MustNew(TestState{
+	s := MustNew[TestState, Activator](TestState{
 		Value: 1,
 		Items: make([]Item, 100),
 	}, nil)
@@ -362,7 +367,7 @@ func BenchmarkDiff(b *testing.B) {
 }
 
 func BenchmarkWithCloner(b *testing.B) {
-	s := MustNew(TestState{Value: 1}, &Config[TestState]{
+	s := MustNew[TestState, Activator](TestState{Value: 1}, &Config[TestState]{
 		Cloner: func(ts TestState) TestState {
 			return TestState{
 				Value:  ts.Value,
@@ -384,7 +389,7 @@ func BenchmarkWithCloner(b *testing.B) {
 }
 
 func TestGetEffect(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 
 	// No effect initially
 	if e := s.GetEffect("test"); e != nil {
@@ -392,11 +397,11 @@ func TestGetEffect(t *testing.T) {
 	}
 
 	// Add effect
-	effect := Func("test", func(ts TestState) TestState {
+	effect := Func[TestState, Activator]("test", func(ts TestState, activator Activator) TestState {
 		ts.Value *= 2
 		return ts
 	})
-	s.AddEffect(effect)
+	s.AddEffect(effect, nil)
 
 	// Should find it now
 	if e := s.GetEffect("test"); e == nil {
@@ -412,7 +417,7 @@ func TestGetEffect(t *testing.T) {
 }
 
 func TestEffects(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 
 	// Empty initially
 	if effects := s.Effects(); effects != nil {
@@ -420,8 +425,8 @@ func TestEffects(t *testing.T) {
 	}
 
 	// Add effects
-	s.AddEffect(Func("e1", func(ts TestState) TestState { return ts }))
-	s.AddEffect(Func("e2", func(ts TestState) TestState { return ts }))
+	s.AddEffect(Func[TestState, Activator]("e1", func(ts TestState, activator Activator) TestState { return ts }), nil)
+	s.AddEffect(Func[TestState, Activator]("e2", func(ts TestState, activator Activator) TestState { return ts }), nil)
 
 	effects := s.Effects()
 	if len(effects) != 2 {
@@ -436,22 +441,22 @@ func TestEffects(t *testing.T) {
 }
 
 func TestAddEffectDuplicateID(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 
 	// First add should succeed
-	err := s.AddEffect(Func("test", func(ts TestState) TestState {
+	err := s.AddEffect(Func[TestState, Activator]("test", func(ts TestState, activator Activator) TestState {
 		ts.Value *= 2
 		return ts
-	}))
+	}), nil)
 	if err != nil {
 		t.Errorf("first AddEffect should succeed, got: %v", err)
 	}
 
 	// Second add with same ID should fail
-	err = s.AddEffect(Func("test", func(ts TestState) TestState {
+	err = s.AddEffect(Func[TestState, Activator]("test", func(ts TestState, activator Activator) TestState {
 		ts.Value *= 3
 		return ts
-	}))
+	}), nil)
 	if err == nil {
 		t.Error("duplicate ID should return error")
 	}
@@ -462,31 +467,31 @@ func TestAddEffectDuplicateID(t *testing.T) {
 	}
 
 	// Different ID should still work
-	err = s.AddEffect(Func("test2", func(ts TestState) TestState {
+	err = s.AddEffect(Func[TestState, Activator]("test2", func(ts TestState, activator Activator) TestState {
 		ts.Value += 10
 		return ts
-	}))
+	}), nil)
 	if err != nil {
 		t.Errorf("different ID should succeed, got: %v", err)
 	}
 }
 
 func TestCleanupExpired(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
 	// Add a timed effect that expires immediately
-	expired := Timed("expired", -1*time.Second, func(ts TestState) TestState {
+	expired := Timed[TestState, Activator]("expired", -1*time.Second, func(ts TestState, activator Activator) TestState {
 		ts.Value *= 2
 		return ts
 	})
-	s.AddEffect(expired)
+	s.AddEffect(expired, nil)
 	s.ClearPrevious()
 
 	// Add a non-expiring effect
-	s.AddEffect(Func("permanent", func(ts TestState) TestState {
+	s.AddEffect(Func[TestState, Activator]("permanent", func(ts TestState, activator Activator) TestState {
 		ts.Value += 1
 		return ts
-	}))
+	}), nil)
 	s.ClearPrevious()
 
 	// Should have 2 effects
@@ -528,14 +533,14 @@ func TestCleanupExpired(t *testing.T) {
 
 func TestCleanupExpiredPreservesPendingChanges(t *testing.T) {
 	// Critical test: CleanupExpired must NOT overwrite pending state changes
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
 	// Add a timed effect that expires immediately
-	expired := Timed("temp", -1*time.Second, func(ts TestState) TestState {
+	expired := Timed[TestState, Activator]("temp", -1*time.Second, func(ts TestState, activator Activator) TestState {
 		ts.Value = 999
 		return ts
 	})
-	s.AddEffect(expired)
+	s.AddEffect(expired, nil)
 	s.ClearPrevious()
 
 	// Now make a state change (Value: 100 -> 200)
@@ -567,14 +572,14 @@ func TestCleanupExpiredPreservesPendingChanges(t *testing.T) {
 }
 
 func TestDelayedEffect(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
 	// Effect that starts in 50ms and lasts 50ms
-	effect := Delayed("delayed", 50*time.Millisecond, 50*time.Millisecond, func(ts TestState) TestState {
+	effect := Delayed[TestState, Activator]("delayed", 50*time.Millisecond, 50*time.Millisecond, func(ts TestState, activator Activator) TestState {
 		ts.Value = 999
 		return ts
 	})
-	s.AddEffect(effect)
+	s.AddEffect(effect, nil)
 
 	// Not yet started
 	if got := s.Get(); got.Value != 100 {
@@ -617,18 +622,18 @@ func TestDelayedEffect(t *testing.T) {
 }
 
 func TestTimedWindowEffect(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
 	now := time.Now()
 	// Effect active from now+25ms to now+75ms
-	effect := TimedWindow("window",
+	effect := TimedWindow[TestState, Activator]("window",
 		now.Add(25*time.Millisecond),
 		now.Add(75*time.Millisecond),
-		func(ts TestState) TestState {
+		func(ts TestState, activator Activator) TestState {
 			ts.Value = 999
 			return ts
 		})
-	s.AddEffect(effect)
+	s.AddEffect(effect, nil)
 
 	// Not yet started
 	if got := s.Get(); got.Value != 100 {
@@ -650,7 +655,7 @@ func TestTimedWindowEffect(t *testing.T) {
 
 // Concurrency tests
 func TestConcurrentStateAccess(t *testing.T) {
-	s := MustNew(TestState{Value: 0}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 0}, nil)
 
 	done := make(chan bool)
 	iterations := 100
@@ -688,8 +693,8 @@ func TestConcurrentStateAccess(t *testing.T) {
 }
 
 func TestConcurrentSessionAccess(t *testing.T) {
-	s := MustNew(TestState{Value: 0}, nil)
-	session := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 0}, nil)
+	session := NewSession[TestState, Activator, string](s)
 
 	done := make(chan bool)
 	iterations := 50
@@ -733,7 +738,7 @@ func TestConcurrentSessionAccess(t *testing.T) {
 }
 
 func TestConcurrentEffectModification(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
 	done := make(chan bool)
 	iterations := 50
@@ -742,10 +747,10 @@ func TestConcurrentEffectModification(t *testing.T) {
 	go func() {
 		for i := 0; i < iterations; i++ {
 			id := fmt.Sprintf("effect-%d", i%5)
-			s.AddEffect(Func(id, func(ts TestState) TestState {
+			s.AddEffect(Func[TestState, Activator](id, func(ts TestState, activator Activator) TestState {
 				ts.Value++
 				return ts
-			}))
+			}), nil)
 			if i%2 == 0 {
 				s.RemoveEffect(id)
 			}
@@ -768,12 +773,12 @@ func TestConcurrentEffectModification(t *testing.T) {
 }
 
 func TestConcurrentTimedEffectAccess(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
-	effect := Timed("buff", time.Hour, func(ts TestState) TestState {
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
+	effect := Timed[TestState, Activator]("buff", time.Hour, func(ts TestState, activator Activator) TestState {
 		ts.Value = 999
 		return ts
 	})
-	s.AddEffect(effect)
+	s.AddEffect(effect, nil)
 
 	done := make(chan bool)
 	iterations := 100
@@ -814,7 +819,7 @@ func TestConcurrentTimedEffectAccess(t *testing.T) {
 // Error case tests
 func TestArrayConfigValidation(t *testing.T) {
 	// This should return error
-	_, err := New(TestState{}, &Config[TestState]{
+	_, err := New[TestState, Activator](TestState{}, &Config[TestState]{
 		ArrayStrategy: ArrayByKey,
 		ArrayKeyField: "", // Empty - should error
 	})
@@ -828,7 +833,7 @@ func TestNewValidatesJSONSerialization(t *testing.T) {
 	type BadState struct {
 		Ch chan int
 	}
-	_, err := New(BadState{}, nil)
+	_, err := New[BadState, Activator](BadState{}, nil)
 	if err == nil {
 		t.Error("Expected error for non-serializable type")
 	}
@@ -837,7 +842,7 @@ func TestNewValidatesJSONSerialization(t *testing.T) {
 // Additional coverage tests
 
 func TestSet(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 
 	newState := TestState{Value: 100, Name: "replaced"}
 	s.Set(newState)
@@ -855,13 +860,13 @@ func TestSet(t *testing.T) {
 }
 
 func TestHasEffect(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 
 	if s.HasEffect("test") {
 		t.Error("HasEffect should be false for non-existent")
 	}
 
-	s.AddEffect(Func("test", func(ts TestState) TestState { return ts }))
+	s.AddEffect(Func[TestState, Activator]("test", func(ts TestState, activator Activator) TestState { return ts }), nil)
 
 	if !s.HasEffect("test") {
 		t.Error("HasEffect should be true after AddEffect")
@@ -873,16 +878,16 @@ func TestHasEffect(t *testing.T) {
 }
 
 func TestClearEffects(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 
-	s.AddEffect(Func("e1", func(ts TestState) TestState {
+	s.AddEffect(Func[TestState, Activator]("e1", func(ts TestState, activator Activator) TestState {
 		ts.Value *= 2
 		return ts
-	}))
-	s.AddEffect(Func("e2", func(ts TestState) TestState {
+	}), nil)
+	s.AddEffect(Func[TestState, Activator]("e2", func(ts TestState, activator Activator) TestState {
 		ts.Value *= 3
 		return ts
-	}))
+	}), nil)
 	s.ClearPrevious()
 
 	if got := s.Get().Value; got != 6 {
@@ -904,7 +909,7 @@ func TestClearEffects(t *testing.T) {
 }
 
 func TestRemoveEffectNotFound(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 
 	if s.RemoveEffect("nonexistent") {
 		t.Error("RemoveEffect should return false for non-existent")
@@ -912,7 +917,7 @@ func TestRemoveEffectNotFound(t *testing.T) {
 }
 
 func TestFullStateWithProjection(t *testing.T) {
-	s := MustNew(TestState{Value: 1, Secret: "hidden"}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1, Secret: "hidden"}, nil)
 
 	// Without projection
 	full := s.FullState(nil)
@@ -932,13 +937,13 @@ func TestFullStateWithProjection(t *testing.T) {
 }
 
 func TestToggleEffect(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
-	toggle := Toggle("toggle", func(ts TestState) TestState {
+	toggle := Toggle[TestState, Activator]("toggle", func(ts TestState, activator Activator) TestState {
 		ts.Value *= 2
 		return ts
 	})
-	s.AddEffect(toggle)
+	s.AddEffect(toggle, nil)
 
 	// Initially enabled
 	if !toggle.IsEnabled() {
@@ -971,15 +976,15 @@ func TestToggleEffect(t *testing.T) {
 }
 
 func TestStackEffectClearAndCount(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
-	stack := Stack[TestState, int]("stack", func(ts TestState, vals []int) TestState {
+	stack := Stack[TestState, Activator, int]("stack", func(ts TestState, vals []int, activator Activator) TestState {
 		for _, v := range vals {
 			ts.Value += v
 		}
 		return ts
 	})
-	s.AddEffect(stack)
+	s.AddEffect(stack, nil)
 
 	stack.Push(10)
 	stack.Push(20)
@@ -1003,7 +1008,7 @@ func TestStackEffectClearAndCount(t *testing.T) {
 }
 
 func TestStackEffectPopEmpty(t *testing.T) {
-	stack := Stack[TestState, int]("stack", func(ts TestState, vals []int) TestState {
+	stack := Stack[TestState, Activator, int]("stack", func(ts TestState, vals []int, activator Activator) TestState {
 		return ts
 	})
 
@@ -1014,8 +1019,8 @@ func TestStackEffectPopEmpty(t *testing.T) {
 }
 
 func TestSessionMethods(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 
 	// Count empty
 	if sess.Count() != 0 {
@@ -1066,7 +1071,7 @@ func TestSessionMethods(t *testing.T) {
 }
 
 func TestDiffArraysByIndex(t *testing.T) {
-	s := MustNew(TestState{
+	s := MustNew[TestState, Activator](TestState{
 		Items: []Item{{ID: "a", Data: 1}, {ID: "b", Data: 2}},
 	}, &Config[TestState]{
 		ArrayStrategy: ArrayByIndex,
@@ -1116,7 +1121,7 @@ func TestDiffTypeMismatch(t *testing.T) {
 		Data any `json:"data"`
 	}
 
-	s := MustNew(FlexState{Data: "string"}, nil)
+	s := MustNew[FlexState, Activator](FlexState{Data: "string"}, nil)
 	s.Update(func(fs *FlexState) {
 		fs.Data = 123 // Change type from string to number
 	})
@@ -1130,7 +1135,7 @@ func TestDiffTypeMismatch(t *testing.T) {
 
 func TestDiffArrayReplace(t *testing.T) {
 	// Default strategy replaces entire array
-	s := MustNew(TestState{
+	s := MustNew[TestState, Activator](TestState{
 		Items: []Item{{ID: "a", Data: 1}},
 	}, nil) // No ArrayStrategy = ArrayReplace
 
@@ -1160,7 +1165,9 @@ func TestPatchJSONEmpty(t *testing.T) {
 
 func TestEscapePtr(t *testing.T) {
 	// Test JSON Pointer escaping
-	s := MustNew(struct {
+	s := MustNew[struct {
+		Field map[string]int `json:"field"`
+	}, Activator](struct {
 		Field map[string]int `json:"field"`
 	}{
 		Field: map[string]int{"a/b": 1, "c~d": 2},
@@ -1188,15 +1195,15 @@ func TestEscapePtr(t *testing.T) {
 }
 
 func TestTimedEffectNilTimeFunc(t *testing.T) {
-	s := MustNew(TestState{Value: 100}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
 
-	effect := Timed("test", time.Hour, func(ts TestState) TestState {
+	effect := Timed[TestState, Activator]("test", time.Hour, func(ts TestState, activator Activator) TestState {
 		ts.Value = 999
 		return ts
 	})
 	effect.TimeFunc = nil // Disable time checks
 
-	s.AddEffect(effect)
+	s.AddEffect(effect, nil)
 
 	// Should always be active with nil TimeFunc
 	if !effect.Active() {
@@ -1222,7 +1229,7 @@ func TestTimedEffectNilTimeFunc(t *testing.T) {
 
 func TestTimedEffectExtendNoExpiration(t *testing.T) {
 	// TimedWindow with zero expiresAt (no expiration)
-	effect := TimedWindow("test", time.Time{}, time.Time{}, func(ts TestState) TestState {
+	effect := TimedWindow[TestState, Activator]("test", time.Time{}, time.Time{}, func(ts TestState, activator Activator) TestState {
 		return ts
 	})
 
@@ -1241,13 +1248,13 @@ func TestMustNewPanic(t *testing.T) {
 	type BadState struct {
 		Ch chan int
 	}
-	MustNew(BadState{}, nil)
+	MustNew[BadState, Activator](BadState{}, nil)
 }
 
 func TestCondEffectID(t *testing.T) {
-	cond := Conditional("cond-test", func(ts TestState) bool {
+	cond := Conditional[TestState, Activator]("cond-test", func(ts TestState, activator Activator) bool {
 		return ts.Value > 50
-	}, func(ts TestState) TestState {
+	}, func(ts TestState, activator Activator) TestState {
 		ts.Value = 999
 		return ts
 	})
@@ -1262,11 +1269,11 @@ func TestPersistRestore(t *testing.T) {
 	path := dir + "/state.json"
 
 	// Create state with effect
-	s := MustNew(TestState{Value: 42, Name: "test"}, nil)
-	s.AddEffect(Func("buff", func(ts TestState) TestState {
+	s := MustNew[TestState, Activator](TestState{Value: 42, Name: "test"}, nil)
+	s.AddEffect(Func[TestState, Activator]("buff", func(ts TestState, activator Activator) TestState {
 		ts.Value *= 2
 		return ts
-	}))
+	}), nil)
 
 	// Create effect meta
 	meta, err := MakeEffectMeta("buff", "multiply", map[string]int{"factor": 2})
@@ -1281,13 +1288,13 @@ func TestPersistRestore(t *testing.T) {
 	}
 
 	// Factory for recreation
-	factory := func(m EffectMeta) (Effect[TestState], error) {
+	factory := func(m EffectMeta) (Effect[TestState, Activator], error) {
 		if m.Type == "multiply" {
 			var params map[string]int
 			if err := json.Unmarshal(m.Params, &params); err != nil {
 				return nil, err
 			}
-			return Func(m.ID, func(ts TestState) TestState {
+			return Func[TestState, Activator](m.ID, func(ts TestState, activator Activator) TestState {
 				ts.Value *= params["factor"]
 				return ts
 			}), nil
@@ -1315,7 +1322,7 @@ func TestPersistRestore(t *testing.T) {
 }
 
 func TestPersistRestoreNoFile(t *testing.T) {
-	result, err := Restore[TestState]("/nonexistent/path.json", nil, nil)
+	result, err := Restore[TestState, Activator]("/nonexistent/path.json", nil, nil)
 	if err != nil {
 		t.Errorf("Restore nonexistent should not error: %v", err)
 	}
@@ -1328,11 +1335,11 @@ func TestPersistRestoreEffectError(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/state.json"
 
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 	meta, _ := MakeEffectMeta("bad", "unknown", nil)
 	Save(path, s, []EffectMeta{meta}, nil)
 
-	factory := func(m EffectMeta) (Effect[TestState], error) {
+	factory := func(m EffectMeta) (Effect[TestState, Activator], error) {
 		return nil, fmt.Errorf("factory error")
 	}
 
@@ -1386,8 +1393,8 @@ func TestMakeEffectMetaError(t *testing.T) {
 }
 
 func TestBroadcastWithProjection(t *testing.T) {
-	s := MustNew(TestState{Value: 1, Secret: "hidden"}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1, Secret: "hidden"}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 
 	// Client with projection that hides secret
 	sess.Connect("user1", func(ts TestState) TestState {
@@ -1416,8 +1423,8 @@ func TestBroadcastWithProjection(t *testing.T) {
 }
 
 func TestBroadcastNoChanges(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 	sess.Connect("user1", nil)
 
 	// No update - Broadcast should return nil
@@ -1428,8 +1435,8 @@ func TestBroadcastNoChanges(t *testing.T) {
 }
 
 func TestBroadcastEmptyDiff(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 
 	// User with projection that makes no visible change
 	sess.Connect("user1", func(ts TestState) TestState {
@@ -1449,21 +1456,21 @@ func TestBroadcastEmptyDiff(t *testing.T) {
 }
 
 func TestToggleEffectID(t *testing.T) {
-	toggle := Toggle("my-toggle", func(ts TestState) TestState { return ts })
+	toggle := Toggle[TestState, Activator]("my-toggle", func(ts TestState, activator Activator) TestState { return ts })
 	if toggle.ID() != "my-toggle" {
 		t.Errorf("Toggle ID = %s, want my-toggle", toggle.ID())
 	}
 }
 
 func TestStackEffectID(t *testing.T) {
-	stack := Stack[TestState, int]("my-stack", func(ts TestState, vals []int) TestState { return ts })
+	stack := Stack[TestState, Activator, int]("my-stack", func(ts TestState, vals []int, activator Activator) TestState { return ts })
 	if stack.ID() != "my-stack" {
 		t.Errorf("Stack ID = %s, want my-stack", stack.ID())
 	}
 }
 
 func TestTimedEffectRemainingActive(t *testing.T) {
-	effect := Timed("test", time.Hour, func(ts TestState) TestState { return ts })
+	effect := Timed[TestState, Activator]("test", time.Hour, func(ts TestState, activator Activator) TestState { return ts })
 
 	// Should have remaining time
 	if effect.Remaining() <= 0 {
@@ -1477,7 +1484,7 @@ func TestTimedEffectRemainingActive(t *testing.T) {
 }
 
 func TestTimedEffectUntilStartDelayed(t *testing.T) {
-	effect := Delayed("test", time.Hour, time.Hour, func(ts TestState) TestState { return ts })
+	effect := Delayed[TestState, Activator]("test", time.Hour, time.Hour, func(ts TestState, activator Activator) TestState { return ts })
 
 	// Should have UntilStart time
 	if effect.UntilStart() <= 0 {
@@ -1486,8 +1493,8 @@ func TestTimedEffectUntilStartDelayed(t *testing.T) {
 }
 
 func TestSessionDiffError(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 	sess.Connect("user1", nil)
 
 	// No previous state - should return empty JSON
@@ -1504,7 +1511,7 @@ func TestSaveExtraMarshaling(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/state.json"
 
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 
 	// Save with extra data
 	err := Save(path, s, nil, map[string]string{"key": "value"})
@@ -1522,7 +1529,7 @@ func TestSaveExtraError(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/state.json"
 
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 
 	// Extra with channel can't be marshaled
 	err := Save(path, s, nil, make(chan int))
@@ -1548,14 +1555,14 @@ func TestRestoreDuplicateEffectID(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/state.json"
 
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 	// Two effects with same ID in metadata
 	meta1, _ := MakeEffectMeta("dup", "test", nil)
 	meta2, _ := MakeEffectMeta("dup", "test", nil)
 	Save(path, s, []EffectMeta{meta1, meta2}, nil)
 
-	factory := func(m EffectMeta) (Effect[TestState], error) {
-		return Func(m.ID, func(ts TestState) TestState { return ts }), nil
+	factory := func(m EffectMeta) (Effect[TestState, Activator], error) {
+		return Func[TestState, Activator](m.ID, func(ts TestState, activator Activator) TestState { return ts }), nil
 	}
 
 	result, err := Restore(path, nil, factory)
@@ -1571,7 +1578,7 @@ func TestRestoreDuplicateEffectID(t *testing.T) {
 
 func TestArrayByKeyNoKeyField(t *testing.T) {
 	// ArrayByKey without KeyField falls back to replace
-	s := MustNew(TestState{
+	s := MustNew[TestState, Activator](TestState{
 		Items: []Item{{ID: "a", Data: 1}},
 	}, &Config[TestState]{
 		ArrayStrategy: ArrayByKey,
@@ -1595,7 +1602,7 @@ func TestArrayByKeyElementWithoutKey(t *testing.T) {
 		Items []map[string]any `json:"items"`
 	}
 
-	s := MustNew(FlexState{
+	s := MustNew[FlexState, Activator](FlexState{
 		Items: []map[string]any{
 			{"id": "a", "data": 1},
 			{"nokey": "b", "data": 2}, // No "id" field
@@ -1621,7 +1628,7 @@ func TestDiffNestedMap(t *testing.T) {
 		Data map[string]map[string]int `json:"data"`
 	}
 
-	s := MustNew(NestedState{
+	s := MustNew[NestedState, Activator](NestedState{
 		Data: map[string]map[string]int{
 			"outer": {"inner": 1},
 		},
@@ -1643,7 +1650,7 @@ func TestDiffAddKey(t *testing.T) {
 		Data map[string]int `json:"data"`
 	}
 
-	s := MustNew(MapState{
+	s := MustNew[MapState, Activator](MapState{
 		Data: map[string]int{"a": 1},
 	}, nil)
 
@@ -1663,7 +1670,7 @@ func TestDiffRemoveKey(t *testing.T) {
 		Data map[string]int `json:"data"`
 	}
 
-	s := MustNew(MapState{
+	s := MustNew[MapState, Activator](MapState{
 		Data: map[string]int{"a": 1, "b": 2},
 	}, nil)
 
@@ -1688,7 +1695,7 @@ func TestNewWithCustomCloner(t *testing.T) {
 		}
 	}
 
-	s, err := New(TestState{Value: 1}, &Config[TestState]{
+	s, err := New[TestState, Activator](TestState{Value: 1}, &Config[TestState]{
 		Cloner: cloner,
 	})
 	if err != nil {
@@ -1705,8 +1712,8 @@ func TestNewWithCustomCloner(t *testing.T) {
 }
 
 func TestBroadcastDiffError(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 
 	sess.Connect("user1", nil)
 	sess.Connect("user2", func(ts TestState) TestState { return ts })
@@ -1737,7 +1744,7 @@ func TestArrayByKeyEmptyKeyField(t *testing.T) {
 }
 
 func TestDiffArraysNoChange(t *testing.T) {
-	s := MustNew(TestState{
+	s := MustNew[TestState, Activator](TestState{
 		Items: []Item{{ID: "a", Data: 1}},
 	}, nil)
 
@@ -1753,8 +1760,8 @@ func TestDiffArraysNoChange(t *testing.T) {
 }
 
 func TestSessionDiffWithUpdate(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 	sess.Connect("user1", nil)
 
 	// Make an update
@@ -1776,12 +1783,12 @@ func TestRestoreWithNoFactory(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/state.json"
 
-	s := MustNew(TestState{Value: 42}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 42}, nil)
 	meta, _ := MakeEffectMeta("test", "test", nil)
 	Save(path, s, []EffectMeta{meta}, nil)
 
 	// Restore without factory - effects metadata is ignored
-	result, err := Restore[TestState](path, nil, nil)
+	result, err := Restore[TestState, Activator](path, nil, nil)
 	if err != nil {
 		t.Fatalf("Restore error: %v", err)
 	}
@@ -1800,12 +1807,12 @@ func TestRestoreFactoryReturnsNil(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/state.json"
 
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 	meta, _ := MakeEffectMeta("test", "test", nil)
 	Save(path, s, []EffectMeta{meta}, nil)
 
 	// Factory that returns nil effect (skip)
-	factory := func(m EffectMeta) (Effect[TestState], error) {
+	factory := func(m EffectMeta) (Effect[TestState, Activator], error) {
 		return nil, nil // Skip this effect
 	}
 
@@ -1823,7 +1830,7 @@ func TestRestoreFactoryReturnsNil(t *testing.T) {
 func TestCalcDiffError(t *testing.T) {
 	// calcDiff is hard to make fail since New validates JSON serialization
 	// but we can test it indirectly through Diff
-	s := MustNew(TestState{Value: 1}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
 	s.Update(func(ts *TestState) {
 		ts.Value = 2
 	})
@@ -1839,7 +1846,7 @@ func TestCalcDiffError(t *testing.T) {
 
 func TestTimedEffectExpiredRemaining(t *testing.T) {
 	// Expired effect should have 0 remaining
-	effect := Timed("test", -time.Hour, func(ts TestState) TestState { return ts })
+	effect := Timed[TestState, Activator]("test", -time.Hour, func(ts TestState, activator Activator) TestState { return ts })
 
 	if effect.Remaining() != 0 {
 		t.Errorf("Expired effect Remaining = %v, want 0", effect.Remaining())
@@ -1848,7 +1855,7 @@ func TestTimedEffectExpiredRemaining(t *testing.T) {
 
 func TestDiffArraysEqual(t *testing.T) {
 	// Test diffArrays when arrays are equal (ArrayReplace strategy)
-	s := MustNew(TestState{
+	s := MustNew[TestState, Activator](TestState{
 		Items: []Item{{ID: "a", Data: 1}},
 	}, nil)
 
@@ -1869,11 +1876,11 @@ func TestRestoreWithConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/state.json"
 
-	s := MustNew(TestState{Value: 42, Items: []Item{{ID: "a", Data: 1}}}, nil)
+	s := MustNew[TestState, Activator](TestState{Value: 42, Items: []Item{{ID: "a", Data: 1}}}, nil)
 	Save(path, s, nil, nil)
 
 	// Restore with custom config
-	result, err := Restore(path, &Config[TestState]{
+	result, err := Restore[TestState, Activator](path, &Config[TestState]{
 		ArrayStrategy: ArrayByKey,
 		ArrayKeyField: "id",
 	}, nil)
@@ -1898,8 +1905,8 @@ func TestLoadNonExistent(t *testing.T) {
 }
 
 func TestSessionDiffEmpty(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 	sess.Connect("user1", nil)
 
 	// Update
@@ -1922,8 +1929,8 @@ func TestSessionDiffEmpty(t *testing.T) {
 }
 
 func TestBroadcastCacheHit(t *testing.T) {
-	s := MustNew(TestState{Value: 1}, nil)
-	sess := NewSession[TestState, string](s)
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
 
 	// Multiple clients with nil projection should use cache
 	sess.Connect("user1", nil)
@@ -1945,5 +1952,185 @@ func TestBroadcastCacheHit(t *testing.T) {
 	if string(diffs["user1"]) != string(diffs["user2"]) ||
 		string(diffs["user2"]) != string(diffs["user3"]) {
 		t.Error("Cached diffs should be identical")
+	}
+}
+
+// TestEffectActivator tests that the activator ID is properly passed to effects
+func TestEffectActivator(t *testing.T) {
+	type GameState struct {
+		Players []struct {
+			ID    string `json:"id"`
+			Score int    `json:"score"`
+		} `json:"players"`
+	}
+
+	s := MustNew[GameState, *string](GameState{
+		Players: []struct {
+			ID    string `json:"id"`
+			Score int    `json:"score"`
+		}{
+			{ID: "alice", Score: 100},
+			{ID: "bob", Score: 100},
+			{ID: "charlie", Score: 100},
+		},
+	}, nil)
+
+	// Effect that doubles score for everyone EXCEPT the activator
+	s.AddEffect(Func[GameState, *string]("double_others", func(gs GameState, activator *string) GameState {
+		var activatorID string
+		if activator != nil {
+			activatorID = *activator
+		}
+		for i := range gs.Players {
+			if gs.Players[i].ID != activatorID {
+				gs.Players[i].Score *= 2
+			}
+		}
+		return gs
+	}), strPtr("alice")) // Alice activates - she should be immune
+
+	state := s.Get()
+
+	// Alice (activator) should NOT be affected
+	if state.Players[0].Score != 100 {
+		t.Errorf("Alice (activator) score = %d, want 100 (immune)", state.Players[0].Score)
+	}
+
+	// Bob and Charlie should be affected
+	if state.Players[1].Score != 200 {
+		t.Errorf("Bob score = %d, want 200", state.Players[1].Score)
+	}
+	if state.Players[2].Score != 200 {
+		t.Errorf("Charlie score = %d, want 200", state.Players[2].Score)
+	}
+}
+
+// TestEffectActivatorNil tests system-activated effects (nil activator)
+func TestEffectActivatorNil(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
+
+	// System effect - affects everyone (nil activator)
+	s.AddEffect(Func[TestState, Activator]("system_buff", func(ts TestState, activator Activator) TestState {
+		if activator == nil {
+			ts.Value *= 2 // Only apply if system-activated
+		}
+		return ts
+	}), nil)
+
+	if got := s.Get().Value; got != 200 {
+		t.Errorf("System effect = %d, want 200", got)
+	}
+}
+
+// TestEffectGetActivator tests retrieving the activator from an effect
+func TestEffectGetActivator(t *testing.T) {
+	s := MustNew[TestState, *string](TestState{Value: 100}, nil)
+
+	effect := Func[TestState, *string]("test", func(ts TestState, activator *string) TestState {
+		return ts
+	})
+	player := "player123"
+	s.AddEffect(effect, &player)
+
+	// Get the effect and check its activator
+	e := s.GetEffect("test")
+	if e == nil {
+		t.Fatal("Effect not found")
+	}
+
+	activator := e.Activator()
+	if activator == nil || *activator != "player123" {
+		t.Errorf("Activator = %v, want 'player123'", activator)
+	}
+}
+
+// TestTimedEffectActivator tests activator with timed effects
+func TestTimedEffectActivator(t *testing.T) {
+	s := MustNew[TestState, *string](TestState{Value: 100}, nil)
+
+	effect := Timed[TestState, *string]("timed_buff", time.Hour, func(ts TestState, activator *string) TestState {
+		if activator != nil && *activator == "vip" {
+			ts.Value *= 10 // VIP gets 10x
+		} else {
+			ts.Value *= 2 // Others get 2x
+		}
+		return ts
+	})
+	vip := "vip"
+	s.AddEffect(effect, &vip)
+
+	if got := s.Get().Value; got != 1000 {
+		t.Errorf("VIP timed effect = %d, want 1000", got)
+	}
+
+	// Check activator is accessible
+	if effect.Activator() == nil || *effect.Activator() != "vip" {
+		t.Errorf("Activator = %v, want 'vip'", effect.Activator())
+	}
+}
+
+// TestConditionalEffectActivator tests activator with conditional effects
+func TestConditionalEffectActivator(t *testing.T) {
+	s := MustNew[TestState, *string](TestState{Value: 100, Name: "active"}, nil)
+
+	// Condition also receives activator
+	admin := "admin"
+	s.AddEffect(Conditional[TestState, *string]("cond_buff",
+		func(ts TestState, activator *string) bool {
+			return ts.Name == "active" && activator != nil && *activator == "admin"
+		},
+		func(ts TestState, activator *string) TestState {
+			ts.Value = 999
+			return ts
+		},
+	), &admin)
+
+	// Condition should be true (name=active, activator=admin)
+	if got := s.Get().Value; got != 999 {
+		t.Errorf("Admin conditional effect = %d, want 999", got)
+	}
+}
+
+// TestSetActivator tests changing the activator after effect creation
+func TestSetActivator(t *testing.T) {
+	s := MustNew[TestState, *string](TestState{Value: 100}, nil)
+
+	effect := Func[TestState, *string]("test", func(ts TestState, activator *string) TestState {
+		if activator != nil && *activator == "new_player" {
+			ts.Value = 500
+		}
+		return ts
+	})
+	oldPlayer := "old_player"
+	s.AddEffect(effect, &oldPlayer)
+
+	// Initial - old_player activator, condition not met
+	if got := s.Get().Value; got != 100 {
+		t.Errorf("Initial = %d, want 100", got)
+	}
+
+	// Change activator
+	newPlayer := "new_player"
+	effect.SetActivator(&newPlayer)
+
+	// Now should apply
+	if got := s.Get().Value; got != 500 {
+		t.Errorf("After SetActivator = %d, want 500", got)
+	}
+}
+
+// Test with string activator (simpler API when nil not needed)
+func TestStringActivator(t *testing.T) {
+	s := MustNew[TestState, string](TestState{Value: 100}, nil)
+
+	s.AddEffect(Func[TestState, string]("test", func(ts TestState, activator string) TestState {
+		if activator == "admin" {
+			ts.Value *= 10
+		}
+		return ts
+	}), "admin")
+
+	if got := s.Get().Value; got != 1000 {
+		t.Errorf("String activator effect = %d, want 1000", got)
 	}
 }

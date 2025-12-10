@@ -33,12 +33,18 @@ func (g Game) Clone() Game {
 	return c
 }
 
+// Activator type - using *string so nil means "system activated"
+type Activator = *string
+
+func strPtr(s string) *string { return &s }
+
 func main() {
 	fmt.Println("=== StateDiff Demo ===")
 	fmt.Println()
 
 	// Create state with custom cloner
-	state, err := statediff.New(Game{
+	// Using *string as activator type - nil = system, *string = player ID
+	state, err := statediff.New[Game, Activator](Game{
 		Round: 1,
 		Phase: "lobby",
 		Players: []Player{
@@ -53,7 +59,7 @@ func main() {
 	}
 
 	// Create session manager
-	session := statediff.NewSession[Game, string](state)
+	session := statediff.NewSession[Game, Activator, string](state)
 
 	// Players connect with their projection (hides other hands)
 	for _, id := range []string{"alice", "bob"} {
@@ -88,15 +94,24 @@ func main() {
 		fmt.Printf("%s: %s\n", id, truncate(string(data)))
 	}
 
-	// Add timed effect (double score for 5 seconds)
-	fmt.Println("\n--- Double score effect (5s) ---")
-	doubleScore := statediff.Timed("double", 5*time.Second, func(g Game) Game {
+	// Add timed effect (double score for 5 seconds) - activated by "alice"
+	// The activator is immune to the effect (only affects others)
+	fmt.Println("\n--- Double score effect (5s) - Alice activates, immune to self ---")
+	doubleScore := statediff.Timed[Game, Activator]("double", 5*time.Second, func(g Game, activator Activator) Game {
+		var activatorID string
+		if activator != nil {
+			activatorID = *activator
+		}
 		for i := range g.Players {
+			// Skip the activator - they are immune to their own effect
+			if g.Players[i].ID == activatorID {
+				continue
+			}
 			g.Players[i].Score *= 2
 		}
 		return g
 	})
-	state.AddEffect(doubleScore)
+	state.AddEffect(doubleScore, strPtr("alice")) // Alice activates it
 
 	for id, data := range session.Tick() {
 		fmt.Printf("%s: %s\n", id, truncate(string(data)))
@@ -105,7 +120,8 @@ func main() {
 	// Check current values
 	fmt.Println("\n--- Current state (with effect) ---")
 	current := state.Get()
-	fmt.Printf("Alice score: %d (base: 100, with 2x: 200)\n", current.Players[0].Score)
+	fmt.Printf("Alice score: %d (activator, immune - stays 100)\n", current.Players[0].Score)
+	fmt.Printf("Bob score: %d (affected by 2x effect)\n", current.Players[1].Score)
 
 	// Remove effect
 	fmt.Println("\n--- Remove effect ---")
@@ -114,9 +130,9 @@ func main() {
 		fmt.Printf("%s: %s\n", id, truncate(string(data)))
 	}
 
-	// Stacking multipliers
-	fmt.Println("\n--- Stacking multipliers ---")
-	multipliers := statediff.Stack[Game, float64]("mult", func(g Game, mults []float64) Game {
+	// Stacking multipliers - system activated (nil activator)
+	fmt.Println("\n--- Stacking multipliers (system effect) ---")
+	multipliers := statediff.Stack[Game, Activator, float64]("mult", func(g Game, mults []float64, activator Activator) Game {
 		total := 1.0
 		for _, m := range mults {
 			total *= m
@@ -126,8 +142,8 @@ func main() {
 		}
 		return g
 	})
-	state.AddEffect(multipliers)
-	session.Tick() // Clear
+	state.AddEffect(multipliers, nil) // System activated - affects everyone
+	session.Tick()                    // Clear
 
 	multipliers.Push(1.5)
 	state.Update(func(g *Game) {}) // Trigger change detection

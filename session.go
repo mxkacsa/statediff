@@ -6,16 +6,17 @@ import (
 )
 
 // Session manages multiple client connections.
+// T is the state type, A is the activator type, ID is the client identifier type.
 // Each client has a projection function that determines what they see.
-type Session[T any, ID comparable] struct {
+type Session[T, A any, ID comparable] struct {
 	mu      sync.RWMutex
-	state   *State[T]
+	state   *State[T, A]
 	clients map[ID]func(T) T // ID -> projection function
 }
 
 // NewSession creates a session manager for the given state
-func NewSession[T any, ID comparable](state *State[T]) *Session[T, ID] {
-	return &Session[T, ID]{
+func NewSession[T, A any, ID comparable](state *State[T, A]) *Session[T, A, ID] {
+	return &Session[T, A, ID]{
 		state:   state,
 		clients: make(map[ID]func(T) T),
 	}
@@ -23,21 +24,21 @@ func NewSession[T any, ID comparable](state *State[T]) *Session[T, ID] {
 
 // Connect registers a client with their projection function.
 // Projection can be nil if client sees full state.
-func (s *Session[T, ID]) Connect(id ID, project func(T) T) {
+func (s *Session[T, A, ID]) Connect(id ID, project func(T) T) {
 	s.mu.Lock()
 	s.clients[id] = project
 	s.mu.Unlock()
 }
 
 // Disconnect removes a client
-func (s *Session[T, ID]) Disconnect(id ID) {
+func (s *Session[T, A, ID]) Disconnect(id ID) {
 	s.mu.Lock()
 	delete(s.clients, id)
 	s.mu.Unlock()
 }
 
 // IsConnected checks if a client is registered
-func (s *Session[T, ID]) IsConnected(id ID) bool {
+func (s *Session[T, A, ID]) IsConnected(id ID) bool {
 	s.mu.RLock()
 	_, ok := s.clients[id]
 	s.mu.RUnlock()
@@ -45,14 +46,14 @@ func (s *Session[T, ID]) IsConnected(id ID) bool {
 }
 
 // Count returns number of connected clients
-func (s *Session[T, ID]) Count() int {
+func (s *Session[T, A, ID]) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.clients)
 }
 
 // IDs returns all connected client IDs
-func (s *Session[T, ID]) IDs() []ID {
+func (s *Session[T, A, ID]) IDs() []ID {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	ids := make([]ID, 0, len(s.clients))
@@ -64,7 +65,7 @@ func (s *Session[T, ID]) IDs() []ID {
 
 // Full returns the full state for a client (for initial sync).
 // Thread-safe: holds lock during state access to prevent races.
-func (s *Session[T, ID]) Full(id ID) ([]byte, error) {
+func (s *Session[T, A, ID]) Full(id ID) ([]byte, error) {
 	s.mu.RLock()
 	project := s.clients[id]
 	state := s.state.FullState(project)
@@ -77,7 +78,7 @@ func (s *Session[T, ID]) Full(id ID) ([]byte, error) {
 
 // Diff returns the diff for a client since last change.
 // Thread-safe: holds lock during diff calculation to prevent races.
-func (s *Session[T, ID]) Diff(id ID) ([]byte, error) {
+func (s *Session[T, A, ID]) Diff(id ID) ([]byte, error) {
 	s.mu.RLock()
 	project := s.clients[id]
 	patch, err := s.state.Diff(project)
@@ -95,7 +96,7 @@ func (s *Session[T, ID]) Diff(id ID) ([]byte, error) {
 // Broadcast returns diffs for all connected clients.
 // Only includes clients with actual changes.
 // Optimized: caches the diff for clients with nil projection (full state view).
-func (s *Session[T, ID]) Broadcast() map[ID][]byte {
+func (s *Session[T, A, ID]) Broadcast() map[ID][]byte {
 	if !s.state.HasChanges() {
 		return nil
 	}
@@ -144,7 +145,7 @@ func (s *Session[T, ID]) Broadcast() map[ID][]byte {
 // Tick cleans up expired effects, broadcasts changes, and clears previous state.
 // This is the recommended way to use the library - just call Tick() after state updates.
 // Typical game loop: Update state -> Tick -> Send to clients
-func (s *Session[T, ID]) Tick() map[ID][]byte {
+func (s *Session[T, A, ID]) Tick() map[ID][]byte {
 	s.state.CleanupExpired() // Automatically handle expired effects
 	result := s.Broadcast()
 	s.state.ClearPrevious()
@@ -152,6 +153,6 @@ func (s *Session[T, ID]) Tick() map[ID][]byte {
 }
 
 // State returns the underlying state for modifications
-func (s *Session[T, ID]) State() *State[T] {
+func (s *Session[T, A, ID]) State() *State[T, A] {
 	return s.state
 }

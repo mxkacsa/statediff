@@ -21,8 +21,8 @@ type Snapshot[T any] struct {
 const SnapshotVersion = 1
 
 // RestoreResult contains the restored state and any non-fatal errors
-type RestoreResult[T any] struct {
-	State        *State[T]
+type RestoreResult[T, A any] struct {
+	State        *State[T, A]
 	EffectErrors []error // Errors from effect factory (non-fatal)
 }
 
@@ -33,11 +33,12 @@ type EffectMeta struct {
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
-// EffectFactory recreates effects from metadata
-type EffectFactory[T any] func(meta EffectMeta) (Effect[T], error)
+// EffectFactory recreates effects from metadata.
+// T is the state type, A is the activator type.
+type EffectFactory[T, A any] func(meta EffectMeta) (Effect[T, A], error)
 
 // Save writes state to a JSON file (atomic write)
-func Save[T any](path string, state *State[T], effects []EffectMeta, extra any) error {
+func Save[T, A any](path string, state *State[T, A], effects []EffectMeta, extra any) error {
 	var extraJSON json.RawMessage
 	if extra != nil {
 		var err error
@@ -100,7 +101,8 @@ func Load[T any](path string) (*Snapshot[T], error) {
 // Restore loads state and recreates effects.
 // Returns RestoreResult which includes both the state and any effect recreation errors.
 // Effect errors are non-fatal - the state is still returned with successfully recreated effects.
-func Restore[T any](path string, cfg *Config[T], factory EffectFactory[T]) (*RestoreResult[T], error) {
+// Note: Restored effects have zero-value activator - set them after restore if needed.
+func Restore[T, A any](path string, cfg *Config[T], factory EffectFactory[T, A]) (*RestoreResult[T, A], error) {
 	snap, err := Load[T](path)
 	if err != nil {
 		return nil, err
@@ -109,13 +111,13 @@ func Restore[T any](path string, cfg *Config[T], factory EffectFactory[T]) (*Res
 		return nil, nil // No saved state
 	}
 
-	state, err := New(snap.State, cfg)
+	state, err := New[T, A](snap.State, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create state: %w", err)
 	}
-	result := &RestoreResult[T]{State: state}
+	result := &RestoreResult[T, A]{State: state}
 
-	// Recreate effects
+	// Recreate effects (restored effects have zero-value activator - they can be re-set after load)
 	if factory != nil {
 		for _, meta := range snap.Effects {
 			effect, err := factory(meta)
@@ -125,7 +127,8 @@ func Restore[T any](path string, cfg *Config[T], factory EffectFactory[T]) (*Res
 				continue
 			}
 			if effect != nil {
-				if err := state.AddEffect(effect); err != nil {
+				var zeroActivator A
+				if err := state.AddEffect(effect, zeroActivator); err != nil {
 					result.EffectErrors = append(result.EffectErrors, err)
 					continue
 				}

@@ -2134,3 +2134,247 @@ func TestStringActivator(t *testing.T) {
 		t.Errorf("String activator effect = %d, want 1000", got)
 	}
 }
+
+// Transaction API tests
+
+func TestTransaction(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1, Name: "test"}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	// Transaction batches multiple updates
+	diffs := sess.Transaction(func(tx *Tx[TestState, Activator]) {
+		tx.Update(func(ts *TestState) {
+			ts.Value = 10
+		})
+		tx.Update(func(ts *TestState) {
+			ts.Name = "updated"
+		})
+	})
+
+	// Should have diff for user
+	if len(diffs) != 1 {
+		t.Errorf("Expected 1 diff, got %d", len(diffs))
+	}
+
+	// State should reflect both updates
+	state := s.Get()
+	if state.Value != 10 {
+		t.Errorf("Value = %d, want 10", state.Value)
+	}
+	if state.Name != "updated" {
+		t.Errorf("Name = %s, want 'updated'", state.Name)
+	}
+}
+
+func TestTransactionGet(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	var intermediateValue int
+	sess.Transaction(func(tx *Tx[TestState, Activator]) {
+		tx.Update(func(ts *TestState) {
+			ts.Value = 200
+		})
+		// Get should reflect the update
+		intermediateValue = tx.Get().Value
+	})
+
+	if intermediateValue != 200 {
+		t.Errorf("Get() inside transaction = %d, want 200", intermediateValue)
+	}
+}
+
+func TestTransactionGetBase(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
+	s.AddEffect(Func[TestState, Activator]("double", func(ts TestState, a Activator) TestState {
+		ts.Value *= 2
+		return ts
+	}), nil)
+
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	var baseValue, effectValue int
+	sess.Transaction(func(tx *Tx[TestState, Activator]) {
+		baseValue = tx.GetBase().Value // Without effects
+		effectValue = tx.Get().Value   // With effects
+	})
+
+	if baseValue != 100 {
+		t.Errorf("GetBase() = %d, want 100", baseValue)
+	}
+	if effectValue != 200 {
+		t.Errorf("Get() with effect = %d, want 200", effectValue)
+	}
+}
+
+func TestTransactionSet(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1, Name: "old"}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	diffs := sess.Transaction(func(tx *Tx[TestState, Activator]) {
+		tx.Set(TestState{Value: 999, Name: "new"})
+	})
+
+	if len(diffs) != 1 {
+		t.Errorf("Expected 1 diff, got %d", len(diffs))
+	}
+
+	state := s.Get()
+	if state.Value != 999 || state.Name != "new" {
+		t.Errorf("State = %+v, want {Value:999 Name:new}", state)
+	}
+}
+
+func TestTransactionNoChanges(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	// Empty transaction
+	diffs := sess.Transaction(func(tx *Tx[TestState, Activator]) {
+		// No updates
+	})
+
+	// Should have no diffs
+	if len(diffs) != 0 {
+		t.Errorf("Expected 0 diffs for empty transaction, got %d", len(diffs))
+	}
+}
+
+func TestTransactionMultipleClients(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1, Secret: "hidden"}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+
+	// Client with projection
+	sess.Connect("user1", func(ts TestState) TestState {
+		ts.Secret = ""
+		return ts
+	})
+	// Client without projection
+	sess.Connect("admin", nil)
+
+	diffs := sess.Transaction(func(tx *Tx[TestState, Activator]) {
+		tx.Update(func(ts *TestState) {
+			ts.Value = 2
+			ts.Secret = "newsecret"
+		})
+	})
+
+	// Both should get diffs
+	if len(diffs) != 2 {
+		t.Errorf("Expected 2 diffs, got %d", len(diffs))
+	}
+
+	// Admin sees secret change
+	if !strings.Contains(string(diffs["admin"]), "newsecret") {
+		t.Error("Admin should see secret change")
+	}
+
+	// User1 should not see secret change (projected out)
+	if strings.Contains(string(diffs["user1"]), "secret") {
+		t.Error("User1 should not see secret field")
+	}
+}
+
+func TestApplyUpdate(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	// Simple single update
+	diffs := sess.ApplyUpdate(func(ts *TestState) {
+		ts.Value = 42
+	})
+
+	if len(diffs) != 1 {
+		t.Errorf("Expected 1 diff, got %d", len(diffs))
+	}
+
+	if s.Get().Value != 42 {
+		t.Errorf("Value = %d, want 42", s.Get().Value)
+	}
+}
+
+func TestApplyUpdateNoClients(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	// No clients connected
+
+	diffs := sess.ApplyUpdate(func(ts *TestState) {
+		ts.Value = 42
+	})
+
+	// No diffs (no clients)
+	if len(diffs) != 0 {
+		t.Errorf("Expected 0 diffs with no clients, got %d", len(diffs))
+	}
+
+	// State should still be updated
+	if s.Get().Value != 42 {
+		t.Errorf("Value = %d, want 42", s.Get().Value)
+	}
+}
+
+func TestApplyUpdateVsTransaction(t *testing.T) {
+	// Both should produce equivalent results for single updates
+	s1 := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess1 := NewSession[TestState, Activator, string](s1)
+	sess1.Connect("user1", nil)
+
+	s2 := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess2 := NewSession[TestState, Activator, string](s2)
+	sess2.Connect("user1", nil)
+
+	// Using ApplyUpdate
+	diffs1 := sess1.ApplyUpdate(func(ts *TestState) {
+		ts.Value = 42
+	})
+
+	// Using Transaction
+	diffs2 := sess2.Transaction(func(tx *Tx[TestState, Activator]) {
+		tx.Update(func(ts *TestState) {
+			ts.Value = 42
+		})
+	})
+
+	// Results should be equivalent
+	if string(diffs1["user1"]) != string(diffs2["user1"]) {
+		t.Errorf("ApplyUpdate and Transaction produced different diffs:\n  ApplyUpdate: %s\n  Transaction: %s",
+			diffs1["user1"], diffs2["user1"])
+	}
+}
+
+func TestTransactionWithEffects(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
+	s.AddEffect(Func[TestState, Activator]("double", func(ts TestState, a Activator) TestState {
+		ts.Value *= 2
+		return ts
+	}), nil)
+
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	diffs := sess.Transaction(func(tx *Tx[TestState, Activator]) {
+		// Effect is applied: 100 * 2 = 200
+		if tx.Get().Value != 200 {
+			t.Errorf("Get() with effect = %d, want 200", tx.Get().Value)
+		}
+
+		tx.Update(func(ts *TestState) {
+			ts.Value = 50 // Base becomes 50, with effect: 100
+		})
+	})
+
+	if len(diffs) != 1 {
+		t.Errorf("Expected 1 diff, got %d", len(diffs))
+	}
+
+	// Final state with effect
+	if s.Get().Value != 100 {
+		t.Errorf("Final value with effect = %d, want 100 (50*2)", s.Get().Value)
+	}
+}

@@ -156,3 +156,57 @@ func (s *Session[T, A, ID]) Tick() map[ID][]byte {
 func (s *Session[T, A, ID]) State() *State[T, A] {
 	return s.state
 }
+
+// Tx represents a transaction scope for state modifications.
+// All updates within a transaction are batched and broadcast together.
+type Tx[T, A any] struct {
+	state *State[T, A]
+}
+
+// Update modifies the state within the transaction
+func (tx *Tx[T, A]) Update(fn func(*T)) {
+	tx.state.Update(fn)
+}
+
+// Set replaces the entire state within the transaction
+func (tx *Tx[T, A]) Set(newState T) {
+	tx.state.Set(newState)
+}
+
+// Get returns the current state with effects applied
+func (tx *Tx[T, A]) Get() T {
+	return tx.state.Get()
+}
+
+// GetBase returns the current state without effects
+func (tx *Tx[T, A]) GetBase() T {
+	return tx.state.GetBase()
+}
+
+// Transaction executes a function with batched state updates and automatically broadcasts changes.
+// This is the recommended way to modify state - it ensures all updates are broadcast together
+// and makes it impossible to forget the broadcast.
+//
+// Example:
+//
+//	diffs := session.Transaction(func(tx *Tx[Game, string]) {
+//	    tx.Update(func(g *Game) { g.Round++ })
+//	    tx.Update(func(g *Game) { g.Phase = "draw" })
+//	})
+//	// diffs are automatically generated and ready to send
+func (s *Session[T, A, ID]) Transaction(fn func(tx *Tx[T, A])) map[ID][]byte {
+	tx := &Tx[T, A]{state: s.state}
+	fn(tx)
+	return s.Tick()
+}
+
+// ApplyUpdate is a shorthand for a single state update with automatic broadcast.
+// Use Transaction() for multiple updates that should be batched together.
+//
+// Example:
+//
+//	diffs := session.ApplyUpdate(func(g *Game) { g.Round++ })
+func (s *Session[T, A, ID]) ApplyUpdate(fn func(*T)) map[ID][]byte {
+	s.state.Update(fn)
+	return s.Tick()
+}

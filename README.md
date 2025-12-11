@@ -89,13 +89,19 @@ session.Connect("alice", func(g GameState) GameState {
 data, _ := session.Full("alice")
 ws.Send(data)
 
-// Game loop
-state.Update(func(g *GameState) {
-    g.Round++
-})
+// Transaction-based updates (recommended)
+// Batches multiple updates and automatically broadcasts
+for playerID, diff := range session.Transaction(func(tx *statediff.Tx[GameState, string]) {
+    tx.Update(func(g *GameState) { g.Round++ })
+    tx.Update(func(g *GameState) { g.Phase = "draw" })
+}) {
+    ws.Send(playerID, diff)
+}
 
-// Broadcast diffs
-for playerID, diff := range session.Tick() {
+// Single update shorthand
+for playerID, diff := range session.ApplyUpdate(func(g *GameState) {
+    g.Round++
+}) {
     ws.Send(playerID, diff)
 }
 ```
@@ -173,6 +179,17 @@ session.Diff(id)                // Diff JSON
 session.Tick()                  // Broadcast + clear
 session.Count()                 // Connected clients count
 session.IDs()                   // List of connected client IDs
+
+// Transaction-based API (recommended)
+session.Transaction(func(tx *Tx[T, A]) {
+    tx.Update(func(s *T) {...})  // Batch multiple updates
+    tx.Set(newState)              // Replace entire state
+    tx.Get()                      // Read current state (with effects)
+    tx.GetBase()                  // Read base state (without effects)
+})                                // Returns diffs automatically
+
+// Shorthand for single updates
+session.ApplyUpdate(func(s *T) {...}) // Update + broadcast in one call
 ```
 
 ### Effects
@@ -293,26 +310,31 @@ go func() {
     }
 }()
 
-// Goroutine 2: Game loop
-// Tick() automatically calls CleanupExpired() for you
+// Goroutine 2: Game loop with Transaction (recommended)
+// Transaction ensures updates are batched and broadcast together
 go func() {
     ticker := time.NewTicker(50 * time.Millisecond)
     for range ticker.C {
-        state.Update(func(g *GameState) {
-            // Update game logic
-        })
-        for id, diff := range session.Tick() {
+        for id, diff := range session.Transaction(func(tx *statediff.Tx[GameState, string]) {
+            tx.Update(func(g *GameState) {
+                // Update game logic - all updates batched
+                g.Tick++
+            })
+        }) {
             send(id, diff)
         }
     }
 }()
 
 // Goroutine 3: Handle player actions
+// ApplyUpdate for simple single-update actions
 go func() {
     for action := range actions {
-        state.Update(func(g *GameState) {
-            // Process action
-        })
+        for id, diff := range session.ApplyUpdate(func(g *GameState) {
+            // Process action - automatically broadcast
+        }) {
+            send(id, diff)
+        }
     }
 }()
 ```

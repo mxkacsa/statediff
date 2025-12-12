@@ -210,3 +210,41 @@ func (s *Session[T, A, ID]) ApplyUpdate(fn func(*T)) map[ID][]byte {
 	s.state.Update(fn)
 	return s.Tick()
 }
+
+// OnEffectExpired is a callback type for effect expiration notifications.
+// The callback receives the effect ID and should return the diffs to broadcast.
+type OnEffectExpired[ID comparable] func(effectID string) map[ID][]byte
+
+// AddEffectWithExpiration adds an effect and schedules automatic expiration.
+// When the effect expires, onExpire is called which triggers Tick() and returns diffs.
+// The onExpire callback is called from a goroutine - use the returned diffs to broadcast.
+//
+// For effects that don't implement Schedulable, this behaves like State.AddEffect.
+//
+// Example:
+//
+//	effect := Timed[Game, string]("powerup", 30*time.Second, func(g Game, a string) Game {
+//	    g.Speed *= 2
+//	    return g
+//	})
+//	session.AddEffectWithExpiration(effect, "player1", func(id string) map[string][]byte {
+//	    diffs := session.Tick()
+//	    for clientID, data := range diffs {
+//	        sendToClient(clientID, data)
+//	    }
+//	    return diffs
+//	})
+func (s *Session[T, A, ID]) AddEffectWithExpiration(e Effect[T, A], activator A, onExpire OnEffectExpired[ID]) error {
+	if err := s.state.AddEffect(e, activator); err != nil {
+		return err
+	}
+
+	// Schedule expiration if the effect supports it
+	if sched, ok := any(e).(Schedulable); ok && onExpire != nil {
+		sched.ScheduleExpiration(func(effectID string) {
+			onExpire(effectID)
+		})
+	}
+
+	return nil
+}

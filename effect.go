@@ -92,6 +92,20 @@ func Delayed[T, A any](id string, delay, duration time.Duration, fn func(state T
 	}
 }
 
+// Schedulable is an interface for effects that can schedule automatic expiration callbacks.
+// Effects implementing this interface can notify the system when they expire,
+// enabling automatic cleanup without polling.
+type Schedulable interface {
+	// ScheduleExpiration starts a timer that calls the callback when the effect expires.
+	// The callback receives the effect ID. Safe to call multiple times (restarts timer).
+	// Returns false if the effect has no expiration, already expired, or no TimeFunc.
+	ScheduleExpiration(onExpire func(effectID string)) bool
+
+	// CancelScheduledExpiration stops any pending expiration timer.
+	// Safe to call even if no timer is scheduled.
+	CancelScheduledExpiration()
+}
+
 // TimedEffect is an effect with optional start time and expiration.
 // The effect is only active between startsAt and expiresAt.
 // Thread-safe: all methods can be called concurrently.
@@ -99,6 +113,10 @@ func Delayed[T, A any](id string, delay, duration time.Duration, fn func(state T
 // Time handling: If TimeFunc is nil, time checks are skipped and the effect
 // is always active. Set TimeFunc to time.Now for real-time behavior, or
 // provide a custom function for deterministic/testable time.
+//
+// Automatic expiration: Call ScheduleExpiration() to receive a callback when
+// the effect expires. The timer is automatically cancelled if CancelScheduledExpiration()
+// is called (e.g., when the effect is removed manually).
 type TimedEffect[T, A any] struct {
 	mu        sync.RWMutex
 	id        string
@@ -107,6 +125,9 @@ type TimedEffect[T, A any] struct {
 	startsAt  time.Time        // Zero means active immediately
 	expiresAt time.Time        // Zero means never expires
 	TimeFunc  func() time.Time // If nil, time checks are skipped
+
+	// Expiration scheduling
+	expireTimer *time.Timer
 }
 
 func (e *TimedEffect[T, A]) ID() string { return e.id }
@@ -255,6 +276,61 @@ func (e *TimedEffect[T, A]) SetExpiresAt(t time.Time) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.expiresAt = t
+}
+
+// ScheduleExpiration starts a timer that calls the callback when the effect expires.
+// The callback receives the effect ID. Safe to call multiple times (restarts timer).
+// Returns false if the effect has no expiration, already expired, or no TimeFunc.
+func (e *TimedEffect[T, A]) ScheduleExpiration(onExpire func(effectID string)) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Cancel any existing timer
+	if e.expireTimer != nil {
+		e.expireTimer.Stop()
+		e.expireTimer = nil
+	}
+
+	// Cannot schedule if no time function or no expiration
+	if e.TimeFunc == nil || e.expiresAt.IsZero() {
+		return false
+	}
+
+	// Calculate remaining time
+	remaining := e.expiresAt.Sub(e.TimeFunc())
+	if remaining <= 0 {
+		// Already expired
+		return false
+	}
+
+	// Store effect ID for the closure
+	id := e.id
+
+	e.expireTimer = time.AfterFunc(remaining, func() {
+		e.mu.Lock()
+		// Clear timer reference since it has fired
+		e.expireTimer = nil
+		e.mu.Unlock()
+
+		// Call the callback
+		if onExpire != nil {
+			onExpire(id)
+		}
+	})
+
+	return true
+}
+
+// CancelScheduledExpiration stops any pending expiration timer.
+// Safe to call even if no timer is scheduled.
+func (e *TimedEffect[T, A]) CancelScheduledExpiration() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.expireTimer != nil {
+		e.expireTimer.Stop()
+		e.expireTimer = nil
+	}
 }
 
 // Conditional creates an effect that only applies when condition is true.

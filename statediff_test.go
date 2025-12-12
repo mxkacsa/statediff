@@ -2378,3 +2378,426 @@ func TestTransactionWithEffects(t *testing.T) {
 		t.Errorf("Final value with effect = %d, want 100 (50*2)", s.Get().Value)
 	}
 }
+
+// ===== Scheduled Expiration Tests =====
+
+func TestScheduledExpiration(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	// Create a timed effect that expires in 50ms
+	effect := Timed[TestState, Activator]("boost", 50*time.Millisecond, func(ts TestState, a Activator) TestState {
+		ts.Value = 999
+		return ts
+	})
+
+	// Track when callback is called
+	callbackCalled := make(chan string, 1)
+
+	err := sess.AddEffectWithExpiration(effect, nil, func(effectID string) map[string][]byte {
+		callbackCalled <- effectID
+		return sess.Tick()
+	})
+	if err != nil {
+		t.Fatalf("AddEffectWithExpiration failed: %v", err)
+	}
+
+	// Effect should be active
+	if s.Get().Value != 999 {
+		t.Errorf("Effect not applied, got %d, want 999", s.Get().Value)
+	}
+
+	// Clear previous state for clean test
+	s.ClearPrevious()
+
+	// Wait for expiration callback
+	select {
+	case id := <-callbackCalled:
+		if id != "boost" {
+			t.Errorf("Callback received wrong ID: %s, want 'boost'", id)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Expiration callback not called within timeout")
+	}
+
+	// Effect should be removed after Tick was called in callback
+	if s.Get().Value != 100 {
+		t.Errorf("Effect not removed after expiration, got %d, want 100", s.Get().Value)
+	}
+}
+
+func TestScheduledExpirationCancelledOnManualRemove(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	// Create a timed effect that expires in 100ms
+	effect := Timed[TestState, Activator]("temp", 100*time.Millisecond, func(ts TestState, a Activator) TestState {
+		ts.Value = 999
+		return ts
+	})
+
+	callbackCalled := make(chan bool, 1)
+
+	err := sess.AddEffectWithExpiration(effect, nil, func(effectID string) map[string][]byte {
+		callbackCalled <- true
+		return sess.Tick()
+	})
+	if err != nil {
+		t.Fatalf("AddEffectWithExpiration failed: %v", err)
+	}
+
+	// Manually remove the effect before it expires
+	time.Sleep(20 * time.Millisecond)
+	s.RemoveEffect("temp")
+
+	// Wait to ensure callback is NOT called
+	select {
+	case <-callbackCalled:
+		t.Fatal("Callback should not be called after manual removal")
+	case <-time.After(150 * time.Millisecond):
+		// Good - callback was not called
+	}
+}
+
+func TestScheduledExpirationCancelledOnClearEffects(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	// Create multiple timed effects
+	effect1 := Timed[TestState, Activator]("e1", 100*time.Millisecond, func(ts TestState, a Activator) TestState {
+		ts.Value += 1
+		return ts
+	})
+	effect2 := Timed[TestState, Activator]("e2", 100*time.Millisecond, func(ts TestState, a Activator) TestState {
+		ts.Value += 2
+		return ts
+	})
+
+	callbackCount := 0
+
+	sess.AddEffectWithExpiration(effect1, nil, func(effectID string) map[string][]byte {
+		callbackCount++
+		return sess.Tick()
+	})
+	sess.AddEffectWithExpiration(effect2, nil, func(effectID string) map[string][]byte {
+		callbackCount++
+		return sess.Tick()
+	})
+
+	// Clear all effects
+	time.Sleep(20 * time.Millisecond)
+	s.ClearEffects()
+
+	// Wait to ensure callbacks are NOT called
+	time.Sleep(150 * time.Millisecond)
+
+	if callbackCount != 0 {
+		t.Errorf("Callbacks called %d times, expected 0 after ClearEffects", callbackCount)
+	}
+}
+
+func TestScheduleExpirationDirectOnTimedEffect(t *testing.T) {
+	// Test the ScheduleExpiration method directly on TimedEffect
+	effect := Timed[TestState, Activator]("test", 50*time.Millisecond, func(ts TestState, a Activator) TestState {
+		return ts
+	})
+
+	callbackCalled := make(chan string, 1)
+
+	scheduled := effect.ScheduleExpiration(func(id string) {
+		callbackCalled <- id
+	})
+
+	if !scheduled {
+		t.Fatal("ScheduleExpiration should return true")
+	}
+
+	select {
+	case id := <-callbackCalled:
+		if id != "test" {
+			t.Errorf("Wrong effect ID: %s", id)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Callback not called")
+	}
+}
+
+func TestScheduleExpirationAlreadyExpired(t *testing.T) {
+	// Effect that is already expired
+	effect := Timed[TestState, Activator]("expired", -1*time.Second, func(ts TestState, a Activator) TestState {
+		return ts
+	})
+
+	scheduled := effect.ScheduleExpiration(func(id string) {
+		t.Fatal("Should not be called for already expired effect")
+	})
+
+	if scheduled {
+		t.Error("ScheduleExpiration should return false for expired effect")
+	}
+}
+
+func TestScheduleExpirationNoExpiration(t *testing.T) {
+	// Effect with no expiration (expiresAt is zero)
+	effect := TimedWindow[TestState, Activator]("permanent", time.Time{}, time.Time{}, func(ts TestState, a Activator) TestState {
+		return ts
+	})
+
+	scheduled := effect.ScheduleExpiration(func(id string) {
+		t.Fatal("Should not be called for effect without expiration")
+	})
+
+	if scheduled {
+		t.Error("ScheduleExpiration should return false for effect without expiration")
+	}
+}
+
+func TestScheduleExpirationReschedule(t *testing.T) {
+	// Test that calling ScheduleExpiration multiple times works correctly
+	effect := Timed[TestState, Activator]("test", 100*time.Millisecond, func(ts TestState, a Activator) TestState {
+		return ts
+	})
+
+	callCount := 0
+	callback := func(id string) {
+		callCount++
+	}
+
+	effect.ScheduleExpiration(callback)
+	// Reschedule should work
+	effect.ScheduleExpiration(callback)
+	effect.ScheduleExpiration(callback)
+
+	time.Sleep(150 * time.Millisecond)
+
+	// Only one callback should have fired
+	if callCount != 1 {
+		t.Errorf("Callback called %d times, expected 1", callCount)
+	}
+}
+
+func TestCancelScheduledExpiration(t *testing.T) {
+	effect := Timed[TestState, Activator]("test", 50*time.Millisecond, func(ts TestState, a Activator) TestState {
+		return ts
+	})
+
+	callbackCalled := false
+	effect.ScheduleExpiration(func(id string) {
+		callbackCalled = true
+	})
+
+	// Cancel before it fires
+	time.Sleep(10 * time.Millisecond)
+	effect.CancelScheduledExpiration()
+
+	// Wait past expiration time
+	time.Sleep(100 * time.Millisecond)
+
+	if callbackCalled {
+		t.Error("Callback should not be called after cancellation")
+	}
+}
+
+func TestCancelScheduledExpirationSafeToCallMultipleTimes(t *testing.T) {
+	effect := Timed[TestState, Activator]("test", 50*time.Millisecond, func(ts TestState, a Activator) TestState {
+		return ts
+	})
+
+	effect.ScheduleExpiration(func(id string) {})
+
+	// Should not panic
+	effect.CancelScheduledExpiration()
+	effect.CancelScheduledExpiration()
+	effect.CancelScheduledExpiration()
+}
+
+func TestSchedulableInterface(t *testing.T) {
+	// Verify TimedEffect implements Schedulable
+	effect := Timed[TestState, Activator]("test", time.Second, func(ts TestState, a Activator) TestState {
+		return ts
+	})
+
+	var _ Schedulable = effect // Compile-time check
+
+	// Test via interface
+	var sched Schedulable = effect
+	scheduled := sched.ScheduleExpiration(func(id string) {})
+	if !scheduled {
+		t.Error("Should be able to schedule via interface")
+	}
+	sched.CancelScheduledExpiration()
+}
+
+func TestScheduledExpirationBroadcastsDiff(t *testing.T) {
+	// Test that when an effect expires, the callback is called
+	// and the effect is properly removed from state
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+	sess.Connect("user2", nil)
+
+	// Create a timed effect that expires in 50ms
+	effect := Timed[TestState, Activator]("boost", 50*time.Millisecond, func(ts TestState, a Activator) TestState {
+		ts.Value = 999
+		return ts
+	})
+
+	// Track callback invocation
+	callbackChan := make(chan string, 1)
+
+	sess.AddEffectWithExpiration(effect, nil, func(effectID string) map[string][]byte {
+		callbackChan <- effectID
+		// In real usage, this would call sess.Tick() and broadcast
+		return sess.Tick()
+	})
+
+	// Verify effect is active
+	if s.Get().Value != 999 {
+		t.Errorf("Effect should be active, got %d, want 999", s.Get().Value)
+	}
+
+	// Wait for expiration callback
+	select {
+	case id := <-callbackChan:
+		if id != "boost" {
+			t.Errorf("Callback received wrong ID: %s, want 'boost'", id)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Timeout waiting for expiration callback")
+	}
+
+	// After callback + Tick(), effect should be removed
+	if s.Get().Value != 100 {
+		t.Errorf("Effect should be removed, got %d, want 100", s.Get().Value)
+	}
+
+	// Verify effect is no longer in state
+	if s.HasEffect("boost") {
+		t.Error("Effect 'boost' should be removed from state")
+	}
+}
+
+func TestScheduledExpirationWithManualTrigger(t *testing.T) {
+	// Test that manual removal via RemoveEffect triggers proper cleanup
+	// and scheduled timer doesn't interfere
+	s := MustNew[TestState, Activator](TestState{Value: 100}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	effect := Timed[TestState, Activator]("buff", 200*time.Millisecond, func(ts TestState, a Activator) TestState {
+		ts.Value = 500
+		return ts
+	})
+
+	callbackCount := 0
+	sess.AddEffectWithExpiration(effect, nil, func(effectID string) map[string][]byte {
+		callbackCount++
+		return sess.Tick()
+	})
+
+	// Verify effect is active
+	if s.Get().Value != 500 {
+		t.Errorf("Effect not applied, got %d", s.Get().Value)
+	}
+
+	// Clear previous for clean diff
+	s.ClearPrevious()
+
+	// Manually remove effect before timer expires
+	time.Sleep(50 * time.Millisecond)
+	s.RemoveEffect("buff")
+
+	// Get diff after manual removal
+	diffs := sess.Tick()
+
+	// Should have diff showing value change from 500 to 100
+	if len(diffs) != 1 {
+		t.Errorf("Expected 1 diff after manual removal, got %d", len(diffs))
+	}
+	if diff := string(diffs["user1"]); !strings.Contains(diff, "100") {
+		t.Errorf("Diff should contain 100, got: %s", diff)
+	}
+
+	// Wait past original expiration time
+	time.Sleep(200 * time.Millisecond)
+
+	// Callback should NOT have been called (timer was cancelled)
+	if callbackCount != 0 {
+		t.Errorf("Callback was called %d times, expected 0", callbackCount)
+	}
+}
+
+func TestMultipleEffectsWithDifferentExpirations(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 100, Name: "base"}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	// Effect 1: expires in 30ms, changes Value
+	effect1 := Timed[TestState, Activator]("e1", 30*time.Millisecond, func(ts TestState, a Activator) TestState {
+		ts.Value = 200
+		return ts
+	})
+
+	// Effect 2: expires in 80ms, changes Name
+	effect2 := Timed[TestState, Activator]("e2", 80*time.Millisecond, func(ts TestState, a Activator) TestState {
+		ts.Name = "modified"
+		return ts
+	})
+
+	expiredEffects := make(chan string, 2)
+
+	sess.AddEffectWithExpiration(effect1, nil, func(id string) map[string][]byte {
+		expiredEffects <- id
+		return sess.Tick()
+	})
+	sess.AddEffectWithExpiration(effect2, nil, func(id string) map[string][]byte {
+		expiredEffects <- id
+		return sess.Tick()
+	})
+
+	// Both effects active
+	state := s.Get()
+	if state.Value != 200 || state.Name != "modified" {
+		t.Errorf("Both effects should be active: Value=%d, Name=%s", state.Value, state.Name)
+	}
+
+	s.ClearPrevious()
+
+	// Wait for first expiration
+	select {
+	case id := <-expiredEffects:
+		if id != "e1" {
+			t.Errorf("First expired should be e1, got %s", id)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("First effect didn't expire in time")
+	}
+
+	// After e1 expires: Value should be 100, Name still "modified"
+	state = s.Get()
+	if state.Value != 100 {
+		t.Errorf("Value should be 100 after e1 expires, got %d", state.Value)
+	}
+	if state.Name != "modified" {
+		t.Errorf("Name should still be 'modified', got %s", state.Name)
+	}
+
+	// Wait for second expiration
+	select {
+	case id := <-expiredEffects:
+		if id != "e2" {
+			t.Errorf("Second expired should be e2, got %s", id)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Second effect didn't expire in time")
+	}
+
+	// After e2 expires: everything back to base
+	state = s.Get()
+	if state.Value != 100 || state.Name != "base" {
+		t.Errorf("All effects should be removed: Value=%d, Name=%s", state.Value, state.Name)
+	}
+}

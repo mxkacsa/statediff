@@ -164,12 +164,17 @@ func (s *State[T, A]) AddEffect(e Effect[T, A], activator A) error {
 	return nil
 }
 
-// RemoveEffect removes an effect by ID
+// RemoveEffect removes an effect by ID.
+// If the effect has a scheduled expiration timer, it is cancelled.
 func (s *State[T, A]) RemoveEffect(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, e := range s.effects {
 		if e.ID() == id {
+			// Cancel any scheduled expiration timer
+			if sched, ok := any(e).(Schedulable); ok {
+				sched.CancelScheduledExpiration()
+			}
 			s.previous = s.withEffects(s.current)
 			s.hasPrevi = true
 			s.effects = append(s.effects[:i], s.effects[i+1:]...)
@@ -191,11 +196,18 @@ func (s *State[T, A]) HasEffect(id string) bool {
 	return false
 }
 
-// ClearEffects removes all effects
+// ClearEffects removes all effects.
+// Cancels any scheduled expiration timers.
 func (s *State[T, A]) ClearEffects() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.effects) > 0 {
+		// Cancel all scheduled expiration timers
+		for _, e := range s.effects {
+			if sched, ok := any(e).(Schedulable); ok {
+				sched.CancelScheduledExpiration()
+			}
+		}
 		s.previous = s.withEffects(s.current)
 		s.hasPrevi = true
 		s.effects = nil
@@ -288,16 +300,15 @@ func (s *State[T, A]) CleanupExpired() int {
 		return 0
 	}
 
-	// Check if any effects are expirable and expired
-	hasExpired := false
+	// Find expired effects
+	var expiredEffects []Effect[T, A]
 	for _, e := range s.effects {
 		if exp, ok := any(e).(Expirable); ok && exp.Expired() {
-			hasExpired = true
-			break
+			expiredEffects = append(expiredEffects, e)
 		}
 	}
 
-	if !hasExpired {
+	if len(expiredEffects) == 0 {
 		return 0
 	}
 
@@ -305,7 +316,13 @@ func (s *State[T, A]) CleanupExpired() int {
 	// If hasPrevi is true, an Update() happened this cycle and we must NOT
 	// overwrite previous, or we'll lose the state change diff.
 	if !s.hasPrevi {
-		s.previous = s.withEffects(s.current)
+		// Apply ALL effects (including expired ones) to get the "before" state.
+		// This is needed because expired effects are still "visible" to clients
+		// until CleanupExpired runs and broadcasts the removal.
+		s.previous = s.clone(s.current)
+		for _, e := range s.effects {
+			s.previous = e.Apply(s.previous, e.Activator())
+		}
 		s.hasPrevi = true
 	}
 
@@ -314,6 +331,10 @@ func (s *State[T, A]) CleanupExpired() int {
 	active := s.effects[:0]
 	for _, e := range s.effects {
 		if exp, ok := any(e).(Expirable); ok && exp.Expired() {
+			// Cancel any scheduled expiration timer (may have already fired)
+			if sched, ok := any(e).(Schedulable); ok {
+				sched.CancelScheduledExpiration()
+			}
 			removed++
 			continue
 		}

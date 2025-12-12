@@ -63,11 +63,23 @@ func Timed[T, A any](id string, dur time.Duration, fn func(state T, activator A)
 	}
 }
 
-// TimedWindow creates an effect that activates at startAt and expires at expiresAt.
-// If startAt is zero, the effect is active immediately.
-// If expiresAt is zero, the effect never expires (only startAt matters).
+// TimedWindow creates an effect that activates at startsAt and expires at expiresAt.
+// If startsAt is zero, the effect is active immediately.
+// If expiresAt is zero, the effect never expires (only startsAt matters).
 // Uses time.Now by default - set TimeFunc to nil to disable time checks,
 // or provide a custom time function for testing.
+//
+// This is ideal for restoring effects from persistence - use StartsAt() and ExpiresAt()
+// getters to save the times, then recreate with TimedWindow on restore:
+//
+//	// Save
+//	params := map[string]any{
+//	    "startsAt":  effect.StartsAt(),
+//	    "expiresAt": effect.ExpiresAt(),
+//	}
+//
+//	// Restore
+//	effect := TimedWindow[T, A](id, params["startsAt"], params["expiresAt"], fn)
 func TimedWindow[T, A any](id string, startsAt, expiresAt time.Time, fn func(state T, activator A) T) *TimedEffect[T, A] {
 	return &TimedEffect[T, A]{
 		id:        id,
@@ -276,6 +288,20 @@ func (e *TimedEffect[T, A]) SetExpiresAt(t time.Time) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.expiresAt = t
+}
+
+// StartsAt returns the start time (zero if active immediately)
+func (e *TimedEffect[T, A]) StartsAt() time.Time {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.startsAt
+}
+
+// ExpiresAt returns the expiration time (zero if never expires)
+func (e *TimedEffect[T, A]) ExpiresAt() time.Time {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.expiresAt
 }
 
 // ScheduleExpiration starts a timer that calls the callback when the effect expires.

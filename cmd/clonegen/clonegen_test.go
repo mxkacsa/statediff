@@ -391,6 +391,109 @@ func TestGameClone(t *testing.T) {
 	t.Logf("Test output:\n%s", output)
 }
 
+func TestCrossPackageImports(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "clonegen-cross-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create domain subpackage
+	domainDir := filepath.Join(tmpDir, "domain")
+	if err := os.MkdirAll(domainDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	domainSrc := `package domain
+
+type Item struct {
+	ID   string
+	Name string
+}
+
+func (i Item) Clone() Item {
+	return Item{ID: i.ID, Name: i.Name}
+}
+`
+	if err := os.WriteFile(filepath.Join(domainDir, "item.go"), []byte(domainSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Main package that uses domain types
+	mainSrc := `package main
+
+import (
+	"net/url"
+	"testmod/domain"
+)
+
+type Game struct {
+	Name      string
+	Item      domain.Item
+	Items     []domain.Item
+	ItemMap   map[string]domain.Item
+	ItemPtr   *domain.Item
+	URL       url.URL
+	URLPtr    *url.URL
+	URLSlice  []url.URL
+}
+
+func main() {}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "game.go"), []byte(mainSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	goMod := `module testmod
+
+go 1.21
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	cfg := Config{
+		Types:   []string{"Game"},
+		Output:  "clone_gen.go",
+		Verbose: true,
+	}
+
+	if err := run(cfg); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(tmpDir, "clone_gen.go"))
+	if err != nil {
+		t.Fatalf("read generated file: %v", err)
+	}
+
+	contentStr := string(content)
+	t.Logf("Generated code with cross-package imports:\n%s", contentStr)
+
+	// Check that imports are present
+	expectedImports := []string{
+		`"testmod/domain"`,
+		`"net/url"`,
+	}
+	for _, imp := range expectedImports {
+		if !strings.Contains(contentStr, imp) {
+			t.Errorf("expected generated code to contain import: %s", imp)
+		}
+	}
+
+	// Check that it compiles
+	cmd := exec.Command("go", "build", ".")
+	cmd.Dir = tmpDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build failed: %v\nOutput:\n%s\nGenerated code:\n%s", err, output, content)
+	}
+}
+
 func TestEdgeCases(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "clonegen-edge-*")
 	if err != nil {

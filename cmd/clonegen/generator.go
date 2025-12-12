@@ -120,6 +120,9 @@ func (g *Generator) generateCloneMethod(t *TypeInfo) (string, error) {
 			g.warnings = append(g.warnings, fmt.Sprintf("%s.%s: %s", t.Name, field.Name, field.Warning))
 		}
 
+		// Note: Don't track imports for primitives here - they're just assigned by name.
+		// Imports are tracked when the type is explicitly used in generated code (make, type literals, etc.)
+
 		switch field.Kind {
 		case KindPrimitive, KindString, KindTime, KindInterface, KindChan, KindFunc:
 			primitiveAssigns = append(primitiveAssigns, field.Name)
@@ -168,6 +171,8 @@ func (g *Generator) generateFieldClone(field *FieldInfo, receiver string) string
 		buf.WriteString(g.generatePointerClone(field, src, dst))
 
 	case KindStruct:
+		// Track import for cross-package struct types
+		g.trackImport(field.TypeStr)
 		if field.Embedded {
 			if field.HasClone {
 				buf.WriteString(fmt.Sprintf("\t%s = %s.Clone()\n", dst, src))

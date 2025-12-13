@@ -2801,3 +2801,244 @@ func TestMultipleEffectsWithDifferentExpirations(t *testing.T) {
 		t.Errorf("All effects should be removed: Value=%d, Name=%s", state.Value, state.Name)
 	}
 }
+
+func TestScheduleBroadcastNoDebounce(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	var receivedDiffs map[string][]byte
+	sess.SetBroadcastCallback(func(diffs map[string][]byte) {
+		receivedDiffs = diffs
+	})
+
+	// Update state and schedule broadcast without debounce
+	s.Update(func(ts *TestState) {
+		ts.Value = 42
+	})
+	sess.ScheduleBroadcast()
+
+	// Should be called immediately
+	if receivedDiffs == nil {
+		t.Error("Expected broadcast callback to be called immediately")
+	}
+	if len(receivedDiffs) != 1 {
+		t.Errorf("Expected 1 diff, got %d", len(receivedDiffs))
+	}
+}
+
+func TestScheduleBroadcastWithDebounce(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	callCount := 0
+	var receivedDiffs map[string][]byte
+	sess.SetBroadcastCallback(func(diffs map[string][]byte) {
+		callCount++
+		receivedDiffs = diffs
+	})
+
+	// Set debounce
+	sess.SetDebounce(50 * time.Millisecond)
+
+	// Make first update
+	s.Update(func(ts *TestState) {
+		ts.Value = 10
+	})
+	sess.ScheduleBroadcast()
+
+	// Should not be called immediately
+	if callCount != 0 {
+		t.Error("Callback should not be called immediately with debounce")
+	}
+
+	// Make second update within debounce window
+	time.Sleep(20 * time.Millisecond)
+	s.Update(func(ts *TestState) {
+		ts.Value = 20
+	})
+	sess.ScheduleBroadcast()
+
+	// Still should not be called
+	if callCount != 0 {
+		t.Error("Callback should not be called within debounce window")
+	}
+
+	// Wait for debounce to expire
+	time.Sleep(70 * time.Millisecond)
+
+	// Now should have been called exactly once with combined changes
+	if callCount != 1 {
+		t.Errorf("Callback should be called exactly once, got %d", callCount)
+	}
+	if receivedDiffs == nil {
+		t.Error("Expected to receive diffs")
+	}
+
+	// Verify the final value is in the diff (Value went from 1 to 20)
+	if data, ok := receivedDiffs["user1"]; ok {
+		var ops []Op
+		json.Unmarshal(data, &ops)
+		found := false
+		for _, op := range ops {
+			if op.Path == "/value" {
+				if val, ok := op.Value.(float64); ok && int(val) == 20 {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("Expected value change to 20 in diff, got: %s", data)
+		}
+	} else {
+		t.Error("Expected diff for user1")
+	}
+}
+
+func TestScheduleBroadcastDebounceResets(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	callCount := 0
+	sess.SetBroadcastCallback(func(diffs map[string][]byte) {
+		callCount++
+	})
+
+	sess.SetDebounce(40 * time.Millisecond)
+
+	// First update
+	s.Update(func(ts *TestState) {
+		ts.Value = 10
+	})
+	sess.ScheduleBroadcast()
+
+	// Wait 25ms and make another update - this should reset the timer
+	time.Sleep(25 * time.Millisecond)
+	s.Update(func(ts *TestState) {
+		ts.Value = 20
+	})
+	sess.ScheduleBroadcast()
+
+	// At this point, 25ms passed, timer reset, so we need another 40ms
+	// Wait 25ms more - total 50ms, but timer was reset at 25ms so only 25ms since reset
+	time.Sleep(25 * time.Millisecond)
+
+	// Should still not be called (only 25ms since last schedule, debounce is 40ms)
+	if callCount != 0 {
+		t.Error("Callback should not be called - timer was reset")
+	}
+
+	// Wait another 25ms (total 50ms since reset, debounce is 40ms)
+	time.Sleep(25 * time.Millisecond)
+
+	if callCount != 1 {
+		t.Errorf("Callback should be called exactly once after debounce, got %d", callCount)
+	}
+}
+
+func TestScheduleBroadcastNoChanges(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	callCount := 0
+	sess.SetBroadcastCallback(func(diffs map[string][]byte) {
+		callCount++
+	})
+
+	// Schedule broadcast without any changes
+	sess.ScheduleBroadcast()
+
+	// Callback should not be called (no changes = empty diffs)
+	if callCount != 0 {
+		t.Error("Callback should not be called when there are no changes")
+	}
+}
+
+func TestScheduleBroadcastNoCallback(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	// Update state and schedule broadcast without setting callback
+	s.Update(func(ts *TestState) {
+		ts.Value = 42
+	})
+
+	// Should not panic
+	sess.ScheduleBroadcast()
+
+	// Verify state was still updated and cleared
+	if s.HasChanges() {
+		t.Error("Changes should be cleared after ScheduleBroadcast")
+	}
+}
+
+func TestDebounceMultipleClients(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1, Name: "test"}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+	sess.Connect("user2", func(ts TestState) TestState {
+		ts.Name = "hidden" // User2 has projection
+		return ts
+	})
+
+	var receivedDiffs map[string][]byte
+	sess.SetBroadcastCallback(func(diffs map[string][]byte) {
+		receivedDiffs = diffs
+	})
+
+	sess.SetDebounce(30 * time.Millisecond)
+
+	// Make updates
+	s.Update(func(ts *TestState) {
+		ts.Value = 100
+		ts.Name = "changed"
+	})
+	sess.ScheduleBroadcast()
+
+	// Wait for debounce
+	time.Sleep(50 * time.Millisecond)
+
+	// Both clients should receive diffs
+	if len(receivedDiffs) != 2 {
+		t.Errorf("Expected 2 clients to receive diffs, got %d", len(receivedDiffs))
+	}
+
+	// User1 sees full changes
+	if _, ok := receivedDiffs["user1"]; !ok {
+		t.Error("Expected user1 to receive diff")
+	}
+
+	// User2 also receives diff (with projection applied)
+	if _, ok := receivedDiffs["user2"]; !ok {
+		t.Error("Expected user2 to receive diff")
+	}
+}
+
+func TestSetDebounceToZero(t *testing.T) {
+	s := MustNew[TestState, Activator](TestState{Value: 1}, nil)
+	sess := NewSession[TestState, Activator, string](s)
+	sess.Connect("user1", nil)
+
+	callCount := 0
+	sess.SetBroadcastCallback(func(diffs map[string][]byte) {
+		callCount++
+	})
+
+	// Set debounce, then set it back to 0
+	sess.SetDebounce(100 * time.Millisecond)
+	sess.SetDebounce(0)
+
+	s.Update(func(ts *TestState) {
+		ts.Value = 42
+	})
+	sess.ScheduleBroadcast()
+
+	// Should be immediate now
+	if callCount != 1 {
+		t.Errorf("Expected immediate broadcast when debounce is 0, got %d calls", callCount)
+	}
+}

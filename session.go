@@ -3,6 +3,7 @@ package statediff
 import (
 	"encoding/json"
 	"sync"
+	"time"
 )
 
 // Session manages multiple client connections.
@@ -12,6 +13,12 @@ type Session[T, A any, ID comparable] struct {
 	mu      sync.RWMutex
 	state   *State[T, A]
 	clients map[ID]func(T) T // ID -> projection function
+
+	// Debounce support
+	debounceMu    sync.Mutex
+	debounce      time.Duration
+	debounceTimer *time.Timer
+	onBroadcast   func(map[ID][]byte)
 }
 
 // NewSession creates a session manager for the given state
@@ -247,4 +254,59 @@ func (s *Session[T, A, ID]) AddEffectWithExpiration(e Effect[T, A], activator A,
 	}
 
 	return nil
+}
+
+// SetDebounce sets the debounce duration for broadcasts.
+// When set to a non-zero value, ScheduleBroadcast will wait for the specified
+// duration before broadcasting, accumulating any changes that occur during that time.
+// Set to 0 to disable debouncing (default behavior - immediate broadcast).
+func (s *Session[T, A, ID]) SetDebounce(d time.Duration) {
+	s.debounceMu.Lock()
+	defer s.debounceMu.Unlock()
+	s.debounce = d
+}
+
+// SetBroadcastCallback sets the callback function that will be called
+// when a debounced broadcast is triggered.
+// The callback receives the result of Tick() - a map of client IDs to their diffs.
+func (s *Session[T, A, ID]) SetBroadcastCallback(fn func(map[ID][]byte)) {
+	s.debounceMu.Lock()
+	defer s.debounceMu.Unlock()
+	s.onBroadcast = fn
+}
+
+// ScheduleBroadcast schedules a broadcast to all clients.
+// If debounce is not set (0), it immediately calls Tick() and the broadcast callback.
+// If debounce is set, it waits for the debounce duration before broadcasting,
+// accumulating any additional changes that occur during that time.
+// Returns immediately - the actual broadcast happens asynchronously when debounce is set.
+func (s *Session[T, A, ID]) ScheduleBroadcast() {
+	s.debounceMu.Lock()
+	defer s.debounceMu.Unlock()
+
+	// No debounce - immediate broadcast
+	if s.debounce == 0 {
+		diffs := s.Tick()
+		if s.onBroadcast != nil && len(diffs) > 0 {
+			s.onBroadcast(diffs)
+		}
+		return
+	}
+
+	// Debounced broadcast - reset timer if already running
+	if s.debounceTimer != nil {
+		s.debounceTimer.Stop()
+	}
+
+	s.debounceTimer = time.AfterFunc(s.debounce, func() {
+		s.debounceMu.Lock()
+		callback := s.onBroadcast
+		s.debounceTimer = nil
+		s.debounceMu.Unlock()
+
+		diffs := s.Tick()
+		if callback != nil && len(diffs) > 0 {
+			callback(diffs)
+		}
+	})
 }
